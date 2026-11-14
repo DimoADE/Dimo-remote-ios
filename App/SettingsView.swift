@@ -15,6 +15,7 @@ struct SettingsView: View {
     @Environment(AppAppearanceStore.self) private var appearance
     @Environment(VibeXAccountStore.self) private var account
     @Environment(WorkspaceNavigationStore.self) private var navStore
+    @Environment(AppUpdateStore.self) private var appUpdates
     @State private var path: [SettingsRoute] = []
 
     var body: some View {
@@ -197,9 +198,18 @@ struct SettingsView: View {
                             Text("关于 VibeX")
                                 .font(.subheadline.weight(.medium))
                             Spacer()
-                            Text(currentVersionLabel)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                            if appUpdates.hasUpdate, let release = appUpdates.latestRelease {
+                                Text("新版本 v\(release.version)")
+                                    .font(.caption2.monospacedDigit().weight(.semibold))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2.5)
+                                    .background(Capsule().fill(Color.red.opacity(0.14)))
+                                    .foregroundStyle(Color.red)
+                            } else {
+                                Text(currentVersionLabel)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
@@ -236,10 +246,7 @@ struct SettingsView: View {
     }
 
     private var currentVersionLabel: String {
-        if let active = servers.activeProfile {
-            return "v\(active.serverVersion)"
-        }
-        return "v0.4.5"
+        "v\(appUpdates.currentVersion)"
     }
 
     private func settingsIconBadge(systemImage: String, tint: Color) -> some View {
@@ -1561,6 +1568,7 @@ struct NotificationSettingsDetailView: View {
 
 struct AboutVibeXDetailView: View {
     @Environment(ServerStore.self) private var servers
+    @Environment(AppUpdateStore.self) private var appUpdates
 
     var body: some View {
         List {
@@ -1590,13 +1598,47 @@ struct AboutVibeXDetailView: View {
                 .padding(.vertical, 12)
             }
 
-            Section("版本与协议信息") {
-                LabeledContent("iOS 客户端版本", value: "v0.4.5")
+            Section("版本与在线更新") {
+                LabeledContent("iOS 客户端版本", value: "v\(appUpdates.currentVersion) (#\(appUpdates.currentBuild))")
                 LabeledContent("远程通讯协议", value: "Remote Protocol v1")
                 if let active = servers.activeProfile {
                     LabeledContent("已连接桌面端", value: active.serverName)
                     LabeledContent("桌面端版本", value: "v\(active.serverVersion)")
                     LabeledContent("桌面端地址", value: active.origin)
+                }
+
+                Button {
+                    if appUpdates.hasUpdate {
+                        appUpdates.isSheetPresented = true
+                    } else {
+                        Task { await appUpdates.checkForUpdate(manual: true) }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: appUpdates.hasUpdate ? "arrow.down.app.fill" : "arrow.clockwise")
+                            .foregroundStyle(appUpdates.hasUpdate ? Color.red : Color.accentColor)
+                        if appUpdates.checking {
+                            Text("正在检查更新…")
+                        } else if appUpdates.hasUpdate, let release = appUpdates.latestRelease {
+                            Text("发现新版本 v\(release.version) · 前往 TestFlight 更新")
+                                .fontWeight(.semibold)
+                                .foregroundStyle(Color.red)
+                        } else {
+                            Text("检查更新")
+                                .fontWeight(.medium)
+                        }
+                        Spacer()
+                        if appUpdates.checking {
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(appUpdates.checking)
+
+                if let msg = appUpdates.manualStatusMessage {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -1616,4 +1658,5 @@ struct AboutVibeXDetailView: View {
     SettingsView()
         .environment(ServerStore(defaults: UserDefaults(suiteName: "preview")!))
         .environment(AppAppearanceStore(defaults: UserDefaults(suiteName: "preview")!))
+        .environment(AppUpdateStore(defaults: UserDefaults(suiteName: "preview")!))
 }
