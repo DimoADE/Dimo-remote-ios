@@ -2,10 +2,12 @@ import SwiftUI
 
 @main
 struct VibeXCompanionApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var servers = ServerStore()
     @State private var appearance = AppAppearanceStore()
     @State private var account = VibeXAccountStore()
     @State private var connectFlow = DesktopConnectFlow()
+    @State private var appUpdates = AppUpdateStore()
 
     private var showsLogin: Bool {
         !account.isSignedIn && (servers.profiles.isEmpty || account.requiresLogin)
@@ -24,11 +26,24 @@ struct VibeXCompanionApp: App {
             .environment(appearance)
             .environment(account)
             .environment(connectFlow)
+            .environment(appUpdates)
+            .environment(\.locale, appearance.effectiveLocale)
             .task {
                 account.attach(serverStore: servers)
+                appUpdates.checkIfDue()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    appUpdates.checkIfDue()
+                }
             }
             .onChange(of: account.completedSignIns) { _, _ in
-                connectFlow.presentPicker(servers: servers)
+                connectFlow.autoConnectOnSignIn(servers: servers, account: account)
+            }
+            .onChange(of: account.desktops.count) { _, count in
+                if count == 1 {
+                    connectFlow.autoConnectInitialIfNeeded(servers: servers, account: account)
+                }
             }
             .onChange(of: servers.connectionSuccessCount) { _, _ in
                 account.waiveLoginRequirement()
@@ -42,6 +57,12 @@ struct VibeXCompanionApp: App {
             .sheet(isPresented: $connectFlow.isCodePairingPresented) {
                 PairView()
                     .environment(servers)
+            }
+            .sheet(isPresented: $appUpdates.isSheetPresented) {
+                if let release = appUpdates.latestRelease {
+                    AppUpdateSheet(release: release)
+                        .environment(appUpdates)
+                }
             }
             .alert(
                 "局域网已断开，是否切换至云服务？",

@@ -891,7 +891,7 @@ public struct URLSessionTransport: HttpTransport {
             }
         }
 
-        var request = URLRequest(url: target, timeoutInterval: isPrivateLan ? 0.85 : 10)
+        var request = URLRequest(url: target, timeoutInterval: isPrivateLan ? 15 : 20)
         request.httpMethod = method
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         request.setValue(e2ee.clientPublicKeyBase64, forHTTPHeaderField: E2eeSessionManager.headerClientPub)

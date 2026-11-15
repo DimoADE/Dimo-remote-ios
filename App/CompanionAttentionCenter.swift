@@ -688,8 +688,11 @@ final class CompanionAttentionCenter: NSObject, UNUserNotificationCenterDelegate
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // Always present native iOS system notification banner & sound even when app is in foreground
-        completionHandler([.banner, .list, .sound])
+        if UserDefaults.standard.bool(forKey: "vibex.notify.muteForeground") {
+            completionHandler([])
+        } else {
+            completionHandler([.banner, .list, .sound])
+        }
     }
 
     nonisolated func userNotificationCenter(
@@ -800,6 +803,8 @@ struct CompanionToastOverlay: View {
     @State private var replyText = ""
     @State private var remainingFraction: CGFloat = 1.0
     @FocusState private var replyFocused: Bool
+    @AppStorage("vibex.security.confirmHighRiskApproval") private var confirmHighRiskApproval = true
+    @State private var pendingHighRiskConfirm: (toast: CompanionAttentionToast, prompt: PermissionPrompt, option: PermissionOption)?
 
     var body: some View {
         if let toast = center.activeToast {
@@ -1051,6 +1056,35 @@ struct CompanionToastOverlay: View {
                 .strokeBorder(toast.kind.accentColor.opacity(0.28), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.14), radius: 18, x: 0, y: 8)
+        .confirmationDialog(
+            "确认允许执行此操作？",
+            isPresented: Binding(
+                get: { pendingHighRiskConfirm != nil },
+                set: { if !$0 { pendingHighRiskConfirm = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pending = pendingHighRiskConfirm {
+                Button("确认\(pending.option.label)", role: .destructive) {
+                    pendingHighRiskConfirm = nil
+                    Task {
+                        await center.respondPermission(
+                            client: client,
+                            conversationID: pending.toast.conversation.id,
+                            prompt: pending.prompt,
+                            option: pending.option
+                        )
+                    }
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingHighRiskConfirm = nil
+            }
+        } message: {
+            if let pending = pendingHighRiskConfirm {
+                Text(pending.prompt.command ?? pending.prompt.displayHeading)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1060,13 +1094,17 @@ struct CompanionToastOverlay: View {
                 ForEach(prompt.options) { option in
                     let allow = option.kind.hasPrefix("allow")
                     Button {
-                        Task {
-                            await center.respondPermission(
-                                client: client,
-                                conversationID: toast.conversation.id,
-                                prompt: prompt,
-                                option: option
-                            )
+                        if allow && confirmHighRiskApproval {
+                            pendingHighRiskConfirm = (toast, prompt, option)
+                        } else {
+                            Task {
+                                await center.respondPermission(
+                                    client: client,
+                                    conversationID: toast.conversation.id,
+                                    prompt: prompt,
+                                    option: option
+                                )
+                            }
                         }
                     } label: {
                         HStack(spacing: 4) {

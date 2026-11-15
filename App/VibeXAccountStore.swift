@@ -202,7 +202,7 @@ final class VibeXAccountStore {
     }
 
     var canUseCloudRelay: Bool {
-        overview?.relayPermission != false
+        isSignedIn && (overview?.relayPermission != false)
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -224,6 +224,7 @@ final class VibeXAccountStore {
     func attach(serverStore: ServerStore) {
         self.attachedServerStore = serverStore
         serverStore.accountStore = self
+        serverStore.setCloudRelayAuthorized(canUseCloudRelay)
         if isSignedIn {
             Task { await syncHosts(with: serverStore) }
         }
@@ -328,6 +329,7 @@ final class VibeXAccountStore {
         cloudSavedHosts = []
         lastSyncedAt = nil
         requiresLogin = true
+        attachedServerStore?.handleAccountSignOut()
 
         if let oldToken, !oldToken.isEmpty {
             _ = try? await performRawRequest(
@@ -355,6 +357,7 @@ final class VibeXAccountStore {
                 authenticated: true
             )
             overview = fetched
+            attachedServerStore?.setCloudRelayAuthorized(canUseCloudRelay)
             if let encoded = try? JSONEncoder().encode(fetched) {
                 defaults.set(encoded, forKey: Self.cachedOverviewKey)
             }

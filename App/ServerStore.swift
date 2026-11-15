@@ -12,17 +12,21 @@ struct ServerProfile: Codable, Identifiable, Hashable {
     var hostId: String? = nil
     var hostName: String? = nil
 
-    var isCloudService: Bool {
+    static func isCloudOrigin(_ origin: String) -> Bool {
         let lower = origin.lowercased()
         return lower.contains("/t/") || lower.hasPrefix("https://")
     }
 
+    var isCloudService: Bool {
+        ServerProfile.isCloudOrigin(origin)
+    }
+
     var channelBadgeText: String {
-        isCloudService ? "云服务 Beta" : "局域网"
+        isCloudService ? "云中继" : "局域网"
     }
 
     var transportChannelLabel: String {
-        isCloudService ? "VibeX 云服务 · Beta" : "LAN 局域网直连"
+        isCloudService ? "VibeX 云中继 · Beta" : "LAN 局域网直连"
     }
 
     var displayHost: String {
@@ -69,12 +73,47 @@ struct PendingCloudFallbackPrompt: Identifiable {
     let rttMs: Int
 }
 
+struct ConnectedSasNotice: Identifiable, Equatable {
+    let id = UUID()
+    let hostName: String
+    let sasCode: String
+}
+
+enum CloudNodePreference: Equatable {
+    case auto
+    case official
+    case custom(String)
+}
+
 @Observable
 final class ServerStore {
     private(set) var profiles: [ServerProfile]
     private let defaults: UserDefaults
     private static let key = "server-profiles"
     private static let autoConnectKey = "server-auto-connect"
+    private static let customRelayKey = "vibex.customRelayOrigin"
+
+    var customRelayOrigin: String {
+        didSet {
+            let normalized = Self.normalizeOrigin(customRelayOrigin)
+            if normalized != customRelayOrigin {
+                customRelayOrigin = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Self.customRelayKey)
+        }
+    }
+
+    var hasCustomRelayNode: Bool {
+        !customRelayOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func isCustomRelayOrigin(_ origin: String) -> Bool {
+        guard hasCustomRelayNode else { return false }
+        let normalized = Self.normalizeOrigin(origin)
+        let customBase = Self.normalizeOrigin(customRelayOrigin)
+        return normalized == customBase || normalized.hasPrefix("\(customBase)/")
+    }
 
     // Auto-connect switch (whether to automatically connect to paired computer on launch)
     var autoConnect: Bool {
@@ -93,6 +132,7 @@ final class ServerStore {
     var pairingInProgress: Bool = false
     var pairingError: String?
     var pendingCloudFallback: PendingCloudFallbackPrompt?
+    var connectedSasNotice: ConnectedSasNotice?
     var isPresentingPairSheet: Bool = false
     var connectionSuccessCount: Int = 0
 
@@ -103,14 +143,21 @@ final class ServerStore {
 
     private var discoverTask: Task<Void, Never>?
     private var telemetryLoopTask: Task<Void, Never>?
+    private var sasNoticeTask: Task<Void, Never>?
     private var declinedCloudFallbackProfileIds = Set<String>()
     weak var accountStore: VibeXAccountStore?
+    private(set) var isCloudRelayAuthorized: Bool = false
+
+    func setCloudRelayAuthorized(_ authorized: Bool) {
+        isCloudRelayAuthorized = authorized
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let decoded = (defaults.data(forKey: Self.key))
             .flatMap { try? JSONDecoder().decode([ServerProfile].self, from: $0) } ?? []
         self.profiles = decoded
+        self.customRelayOrigin = Self.normalizeOrigin(defaults.string(forKey: Self.customRelayKey) ?? "")
         let savedAutoConnect = defaults.object(forKey: Self.autoConnectKey) as? Bool ?? true
         self.autoConnect = savedAutoConnect
         self.isSessionConnected = savedAutoConnect || decoded.isEmpty
@@ -182,14 +229,16 @@ final class ServerStore {
         return true
     }
 
-    /// Asks the desktop to approve this phone for the signed-in VibeX account, then adopts the issued credential.
+    /// Connects directly when both devices share one VibeX account (issuing the credential immediately
+    /// and surfacing the 4-digit SAS code non-blockingly), or waits for 1-click desktop confirmation
+    /// when connecting without a matching account.
     @MainActor
     func connectViaAccountRequest(
         origin: String,
         hostId: String,
         hostName: String,
         deviceName: String,
-        accountToken: String,
+        accountToken: String?,
         replaceExistingMobile: Bool,
         onAwaitingApproval: @MainActor (String) -> Void
     ) async throws {
@@ -206,26 +255,55 @@ final class ServerStore {
             replaceExistingMobile: replaceExistingMobile,
             accountToken: accountToken
         )
-        onAwaitingApproval(requested.sasCode)
-        let approved = try await client.awaitConnectApproval(origin: parsed, requestId: requested.requestId)
+        let approved: DeviceConnectRequestResult
+        let wasAutoApproved: Bool
+        if requested.status == "approved", requested.credential != nil {
+            approved = requested
+            wasAutoApproved = true
+        } else {
+            wasAutoApproved = false
+            onAwaitingApproval(requested.sasCode)
+            approved = try await client.awaitConnectApproval(origin: parsed, requestId: requested.requestId)
+        }
         guard let credential = approved.credential else { throw PairingError.connectExpired }
         try KeychainStore.save(credential.access_token, account: credential.device_id)
         let capabilities = try? await HostClient(origin: parsed, accessToken: credential.access_token).checkCapabilities()
         let resolvedName = (approved.hostName ?? hostName)
             .replacingOccurrences(of: ".local", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        adopt(
-            ServerProfile(
-                id: credential.device_id,
-                origin: parsed.value,
-                deviceName: deviceName,
-                serverVersion: capabilities?.server_version ?? "",
-                protocolVersion: capabilities?.protocol_version ?? PairingClient.clientProtocolVersion,
-                scopes: credential.scopes,
-                hostId: approved.hostId.isEmpty ? hostId : AccountDesktop.rawHostId(approved.hostId),
-                hostName: resolvedName.isEmpty ? nil : resolvedName
-            )
+        let profile = ServerProfile(
+            id: credential.device_id,
+            origin: parsed.value,
+            deviceName: deviceName,
+            serverVersion: capabilities?.server_version ?? "",
+            protocolVersion: capabilities?.protocol_version ?? PairingClient.clientProtocolVersion,
+            scopes: credential.scopes,
+            hostId: approved.hostId.isEmpty ? (hostId.isEmpty ? nil : hostId) : AccountDesktop.rawHostId(approved.hostId),
+            hostName: resolvedName.isEmpty ? nil : resolvedName
         )
+        adopt(profile)
+        if wasAutoApproved, !approved.sasCode.isEmpty {
+            presentConnectedSasNotice(hostName: profile.displayHost, sasCode: approved.sasCode)
+        }
+    }
+
+    @MainActor
+    func presentConnectedSasNotice(hostName: String, sasCode: String) {
+        sasNoticeTask?.cancel()
+        let notice = ConnectedSasNotice(hostName: hostName, sasCode: sasCode)
+        connectedSasNotice = notice
+        sasNoticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(4500))
+            guard !Task.isCancelled, self?.connectedSasNotice?.id == notice.id else { return }
+            self?.connectedSasNotice = nil
+        }
+    }
+
+    @MainActor
+    func dismissConnectedSasNotice() {
+        sasNoticeTask?.cancel()
+        sasNoticeTask = nil
+        connectedSasNotice = nil
     }
 
     /// `input` is a pasted or scanned invitation, or a bare 8-digit connection code.
@@ -237,6 +315,7 @@ final class ServerStore {
         manualOrigin: String = "",
         deviceName: String,
         replaceExistingMobile: Bool = false,
+        cloudPreference: CloudNodePreference = .auto,
         onConflict: @escaping @MainActor (PendingMobileConflict) -> Void
     ) async throws {
         let client = PairingClient()
@@ -256,29 +335,112 @@ final class ServerStore {
                 for reach in invitation.reachability where reach.origin.contains("/t/") {
                     PairingClient.rememberRelayBase(reach.origin)
                 }
+                let allowOfficialCloud = accountStore?.canUseCloudRelay == true
+                let customBase: String? = {
+                    switch cloudPreference {
+                    case let .custom(url):
+                        let norm = Self.normalizeOrigin(url)
+                        return norm.isEmpty ? nil : norm
+                    case .auto:
+                        return hasCustomRelayNode ? customRelayOrigin : nil
+                    case .official:
+                        return nil
+                    }
+                }()
+                let allowCloud = allowOfficialCloud || customBase != nil
                 let directOriginText = manualOrigin.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !directOriginText.isEmpty, let directOrigin = try? HostOrigin.parse(directOriginText) {
+                if !directOriginText.isEmpty,
+                   let directOrigin = try? HostOrigin.parse(directOriginText),
+                   allowCloud || !ServerProfile.isCloudOrigin(directOrigin.value)
+                {
                     session = try await client.redeem(
                         origin: directOrigin,
                         pairingToken: invitation.pairing_token,
                         deviceName: deviceName,
                         replaceExistingMobile: replaceExistingMobile
                     )
-                } else {
+                } else if case let .custom(customNode) = cloudPreference {
+                    let normCustom = Self.normalizeOrigin(customNode)
+                    let hostId = invitation.host_id.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let customOriginText = normCustom.contains("/t/") || hostId.isEmpty ? normCustom : "\(normCustom)/t/\(hostId)"
+                    if let parsedCustom = try? HostOrigin.parse(customOriginText) {
+                        session = try await client.redeem(
+                            origin: parsedCustom,
+                            pairingToken: invitation.pairing_token,
+                            deviceName: deviceName,
+                            replaceExistingMobile: replaceExistingMobile
+                        )
+                    } else {
+                        throw PairingError.missingInput("自建云节点地址格式无效")
+                    }
+                } else if allowOfficialCloud {
                     session = try await client.redeem(
                         invitation: invitation,
                         deviceName: deviceName,
                         replaceExistingMobile: replaceExistingMobile
                     )
+                } else {
+                    let lanReachability = invitation.reachability.filter { !ServerProfile.isCloudOrigin($0.origin) }
+                    guard !lanReachability.isEmpty else {
+                        throw PairingError.missingInput("云中继连接需要先登录 VibeX 账号，或请确保手机与电脑在同一局域网")
+                    }
+                    var lastError: Error = PairingError.unreachable
+                    var lanSession: CompanionSession?
+                    for reach in lanReachability {
+                        guard let parsed = try? HostOrigin.parse(reach.origin) else { continue }
+                        do {
+                            lanSession = try await client.redeem(
+                                origin: parsed,
+                                pairingToken: invitation.pairing_token,
+                                deviceName: deviceName,
+                                replaceExistingMobile: replaceExistingMobile
+                            )
+                            break
+                        } catch let err as PairingError {
+                            lastError = err
+                            switch err {
+                            case .codeAlreadyUsed, .codeExpired, .codeInvalid, .notCompanionInvitation, .mobileDeviceConflict:
+                                throw err
+                            default:
+                                continue
+                            }
+                        } catch {
+                            lastError = error
+                            continue
+                        }
+                    }
+                    guard let matched = lanSession else {
+                        throw lastError
+                    }
+                    session = matched
                 }
             } else {
+                let allowOfficialCloud = accountStore?.canUseCloudRelay == true
+                let customNodeBase: String? = {
+                    switch cloudPreference {
+                    case let .custom(url):
+                        let norm = Self.normalizeOrigin(url)
+                        return norm.isEmpty ? nil : norm
+                    case .auto:
+                        return hasCustomRelayNode ? customRelayOrigin : nil
+                    case .official:
+                        return nil
+                    }
+                }()
+                let allowCloud = allowOfficialCloud || customNodeBase != nil
                 var candidateUrls: [String] = []
                 func appendCandidate(_ raw: String) {
                     let normalized = Self.normalizeOrigin(raw)
                     guard !normalized.isEmpty, !candidateUrls.contains(normalized) else { return }
+                    if ServerProfile.isCloudOrigin(normalized) && !allowOfficialCloud && !isCustomRelayOrigin(normalized) {
+                        return
+                    }
                     candidateUrls.append(normalized)
                 }
 
+                if case let .custom(customNode) = cloudPreference {
+                    appendCandidate(customNode)
+                }
                 if !manualOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     appendCandidate(manualOrigin)
                 }
@@ -431,19 +593,33 @@ final class ServerStore {
         pendingCloudFallback = nil
     }
 
+    /// The desktop revokes a phone when another phone connects, it signs out, or the user removes it.
+    private static let revokedFailureReason = "连接授权已失效"
+    private static let revokedNotice = "电脑已收回本机的连接授权，请重新连接"
+
+    /// The account relay URL of a desktop signed in to the same account. It lets the phone reach
+    /// that desktop off-LAN even when the profile never learned a published origin.
+    @MainActor
+    private func accountTenantOrigin(for hostId: String) -> String? {
+        guard let accountStore, accountStore.isSignedIn, accountStore.canUseCloudRelay else { return nil }
+        let rawHostId = AccountDesktop.rawHostId(hostId)
+        guard let desktop = accountStore.desktops.first(where: { $0.hostId == rawHostId }) else { return nil }
+        return desktop.cloudOrigin(relayBase: accountStore.relayBase)
+    }
+
     @MainActor
     func handleActiveCredentialRevoked(_ profile: ServerProfile) {
         guard !isPresentingPairSheet else {
             isOnline = false
             realtimeRttMs = nil
-            connectionFailureReason = "已被其他手机接管下线"
+            connectionFailureReason = Self.revokedFailureReason
             return
         }
         forget(profile)
         isOnline = false
         realtimeRttMs = nil
-        connectionFailureReason = "已被其他手机接管下线"
-        pairingError = "当前电脑已切换至其他手机远程连接，本机已强制下线并清除凭据，下次需重新连接"
+        connectionFailureReason = Self.revokedFailureReason
+        pairingError = Self.revokedNotice
     }
 
     @MainActor
@@ -464,11 +640,59 @@ final class ServerStore {
     }
 
     @MainActor
+    func handleAccountSignOut() {
+        isCloudRelayAuthorized = false
+        if activeProfile?.isCloudService == true {
+            isOnline = false
+            realtimeRttMs = nil
+            connectionFailureReason = "请登录 VibeX 账号"
+        }
+        Task { @MainActor [weak self] in
+            await self?.refreshActiveTelemetry()
+        }
+    }
+
+    @MainActor
     func refreshActiveTelemetry() async {
         guard let active = activeProfile else {
             isOnline = false
             realtimeRttMs = nil
             connectionFailureReason = nil
+            return
+        }
+
+        let canUseCloud = accountStore?.canUseCloudRelay == true || isCustomRelayOrigin(active.origin)
+        if active.isCloudService && !canUseCloud {
+            // Cloud relay requires an active signed-in VibeX account; only allow LAN fallback.
+            if let hostId = active.hostId, !hostId.isEmpty {
+                let candidates = await PairingClient.resolveHostRendezvous(
+                    hostId: hostId,
+                    knownOrigins: profiles.map(\.origin)
+                )
+                for candidate in candidates where !ServerProfile.isCloudOrigin(candidate) {
+                    if let probe = await PairingClient.probeHostHealth(
+                        originUrl: candidate,
+                        timeoutSeconds: 1.5,
+                        expectedHostId: hostId
+                    ) {
+                        if let idx = profiles.firstIndex(where: { $0.id == active.id }) {
+                            profiles[idx].origin = probe.host.origin
+                            profiles[idx].hostName = active.hostName ?? probe.host.displayName
+                            persist()
+                        }
+                        if let updatedActive = activeProfile {
+                            guard await verifyActiveTokenNotRevoked(updatedActive) else { return }
+                        }
+                        isOnline = true
+                        realtimeRttMs = probe.rttMs
+                        connectionFailureReason = nil
+                        return
+                    }
+                }
+            }
+            isOnline = false
+            realtimeRttMs = nil
+            connectionFailureReason = "请登录 VibeX 账号"
             return
         }
 
@@ -497,18 +721,22 @@ final class ServerStore {
 
         // If the computer switched to or from Cloud Service and we know its hostId, try rendezvous origins
         if let hostId = active.hostId, !hostId.isEmpty {
-            let candidates = await PairingClient.resolveHostRendezvous(
+            var candidates = await PairingClient.resolveHostRendezvous(
                 hostId: hostId,
                 knownOrigins: profiles.map(\.origin)
             )
+            if let accountOrigin = accountTenantOrigin(for: hostId), !candidates.contains(accountOrigin) {
+                candidates.append(accountOrigin)
+            }
             for candidate in candidates where candidate != active.origin {
                 if let probe = await PairingClient.probeHostHealth(
                     originUrl: candidate,
                     timeoutSeconds: 1.5,
                     expectedHostId: hostId
                 ) {
-                    // If the user originally connected via LAN direct, ask before switching to Cloud Service!
-                    if !active.isCloudService && probe.host.isCloudService {
+                    // Seamlessly switch to Cloud Service when the user's account allows cloud relay;
+                    // only prompt if the user is not signed into an account with cloud relay permission.
+                    if !active.isCloudService && probe.host.isCloudService && accountStore?.canUseCloudRelay == false {
                         isOnline = false
                         realtimeRttMs = nil
                         connectionFailureReason = "局域网已断开"
@@ -698,6 +926,9 @@ final class ServerStore {
     }
 
     func client(for profile: ServerProfile) -> HostClient? {
+        if profile.isCloudService && !isCloudRelayAuthorized && !isCustomRelayOrigin(profile.origin) {
+            return nil
+        }
         guard let origin = try? HostOrigin.parse(profile.origin),
               let token = KeychainStore.read(account: profile.id)
         else { return nil }

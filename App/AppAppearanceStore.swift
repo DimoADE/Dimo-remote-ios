@@ -5,6 +5,27 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
+enum AppLanguageMode: String, CaseIterable, Identifiable {
+    case zhHans = "zh-Hans"
+    case en = "en"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .zhHans: return "简体中文"
+        case .en: return "English"
+        }
+    }
+
+    var locale: Locale {
+        switch self {
+        case .zhHans: return Locale(identifier: "zh_Hans")
+        case .en: return Locale(identifier: "en")
+        }
+    }
+}
+
 enum AppThemeMode: String, CaseIterable, Identifiable {
     case system
     case light
@@ -14,9 +35,18 @@ enum AppThemeMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .system: return "跟随系统"
+        case .system: return "自动"
         case .light: return "浅色"
         case .dark: return "深色"
+        }
+    }
+
+    func localizedTitle(english: Bool) -> String {
+        guard english else { return title }
+        switch self {
+        case .system: return "Auto"
+        case .light: return "Light"
+        case .dark: return "Dark"
         }
     }
 
@@ -69,6 +99,17 @@ enum AppFontSizePreset: String, CaseIterable, Identifiable {
         case .mediumLarge: return "中大"
         case .large: return "大"
         case .extraLarge: return "特大"
+        }
+    }
+
+    func localizedTitle(english: Bool) -> String {
+        guard english else { return title }
+        switch self {
+        case .small: return "Small"
+        case .standard: return "Standard"
+        case .mediumLarge: return "Medium"
+        case .large: return "Large"
+        case .extraLarge: return "XL"
         }
     }
 
@@ -129,6 +170,16 @@ enum AppFontStylePreset: String, CaseIterable, Identifiable {
         }
     }
 
+    func localizedShortTitle(english: Bool) -> String {
+        guard english else { return shortTitle }
+        switch self {
+        case .system: return "System"
+        case .rounded: return "Rounded"
+        case .serif: return "Serif"
+        case .monospaced: return "Mono"
+        }
+    }
+
     var subtitle: String {
         switch self {
         case .system: return "清晰均衡的 Apple 原生无衬线字体"
@@ -182,8 +233,22 @@ final class AppAppearanceStore {
     var fontStylePreset: AppFontStylePreset {
         didSet { defaults.set(fontStylePreset.rawValue, forKey: "vibex.appearance.fontStyle") }
     }
+    var languageMode: AppLanguageMode {
+        didSet {
+            defaults.set(languageMode.rawValue, forKey: "vibex.appearance.language")
+            defaults.set([languageMode.rawValue], forKey: "AppleLanguages")
+        }
+    }
+
+    // 3b. Security & Guardrails
+    var confirmHighRiskApproval: Bool {
+        didSet { defaults.set(confirmHighRiskApproval, forKey: "vibex.security.confirmHighRiskApproval") }
+    }
 
     // 4. Notifications
+    var muteForegroundNotifications: Bool {
+        didSet { defaults.set(muteForegroundNotifications, forKey: "vibex.notify.muteForeground") }
+    }
     var notifyTurnCompleted: Bool {
         didSet { defaults.set(notifyTurnCompleted, forKey: "vibex.notify.turnCompleted") }
     }
@@ -200,6 +265,7 @@ final class AppAppearanceStore {
         didSet { defaults.set(hapticFeedback, forKey: "vibex.notify.haptic") }
     }
     var systemNotificationStatusText: String = "已启用"
+    var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
 
     private weak var activeOverlayView: UIView?
 
@@ -222,6 +288,12 @@ final class AppAppearanceStore {
         let rawStyle = defaults.string(forKey: "vibex.appearance.fontStyle") ?? AppFontStylePreset.system.rawValue
         self.fontStylePreset = AppFontStylePreset(rawValue: rawStyle) ?? .system
 
+        let rawLang = defaults.string(forKey: "vibex.appearance.language") ?? AppLanguageMode.zhHans.rawValue
+        self.languageMode = AppLanguageMode(rawValue: rawLang) ?? .zhHans
+
+        self.confirmHighRiskApproval = defaults.object(forKey: "vibex.security.confirmHighRiskApproval") as? Bool ?? true
+        self.muteForegroundNotifications = defaults.object(forKey: "vibex.notify.muteForeground") as? Bool ?? false
+
         self.notifyTurnCompleted = defaults.object(forKey: "vibex.notify.turnCompleted") as? Bool ?? true
         self.notifyApprovalRequired = defaults.object(forKey: "vibex.notify.approvalRequired") as? Bool ?? true
         self.notifyCollabMessages = defaults.object(forKey: "vibex.notify.collabMessages") as? Bool ?? true
@@ -232,6 +304,28 @@ final class AppAppearanceStore {
             applyInterfaceStyleToAllWindows(themeMode.uiInterfaceStyle)
             await refreshNotificationAuthorizationStatus()
         }
+    }
+
+    var effectiveLocale: Locale {
+        languageMode.locale
+    }
+
+    var systemNotificationStatusTextLocalized: String {
+        let isEn = languageMode == .en
+        switch notificationAuthorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return isEn ? "Enabled" : "系统通知已开启"
+        case .denied:
+            return isEn ? "Disabled" : "系统通知已关闭"
+        case .notDetermined:
+            return isEn ? "Not Set" : "待授权"
+        @unknown default:
+            return isEn ? "Unknown" : "未知"
+        }
+    }
+
+    func l(_ zh: String, _ en: String) -> String {
+        languageMode == .en ? en : zh
     }
 
     var avatarConfig: CollabBotAvatarConfig {
@@ -368,6 +462,7 @@ final class AppAppearanceStore {
 
     func refreshNotificationAuthorizationStatus() async {
         let settings = await UNUserNotificationCenter.current().notificationSettings()
+        notificationAuthorizationStatus = settings.authorizationStatus
         switch settings.authorizationStatus {
         case .authorized, .provisional, .ephemeral:
             systemNotificationStatusText = "系统通知已开启"
