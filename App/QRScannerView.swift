@@ -16,68 +16,80 @@ struct QRScannerView: View {
 
     var body: some View {
         ZStack {
-            QRScannerCameraRepresentable(
-                zoomFactor: $selectedZoom,
-                torchOn: $torchOn,
-                onCode: { code in
-                    let generator = UINotificationFeedbackGenerator()
-                    generator.notificationOccurred(.success)
-                    onCode(code)
-                },
-                onFailure: onFailure
-            )
-            .ignoresSafeArea()
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
 
-            // Viewfinder & Controls Overlay
+            // Frosted Card Viewfinder (matching t3-style squircle scanner)
             VStack(spacing: 0) {
                 Spacer()
 
-                // Target Reticle
-                ZStack {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.22), lineWidth: 1.5)
-                        .frame(width: 260, height: 260)
+                VStack(spacing: 22) {
+                    QRScannerCameraRepresentable(
+                        zoomFactor: $selectedZoom,
+                        torchOn: $torchOn,
+                        onCode: { code in
+                            let generator = UINotificationFeedbackGenerator()
+                            generator.notificationOccurred(.success)
+                            onCode(code)
+                        },
+                        onFailure: onFailure
+                    )
+                    .frame(width: 248, height: 248)
+                    .clipShape(RoundedRectangle(cornerRadius: 46, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 46, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.82), lineWidth: 1.8)
+                    )
+                    .shadow(color: .black.opacity(0.14), radius: 16, y: 6)
 
-                    ScannerCornerBrackets()
-                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-                        .frame(width: 260, height: 260)
-                }
+                    Text("请扫描桌面端「远程连接」中的配对二维码")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
 
-                // Zoom Pills (1x / 1.5x / 2.5x)
-                HStack(spacing: 10) {
-                    ForEach([1.0, 1.5, 2.5], id: \.self) { factor in
-                        let isSelected = abs(selectedZoom - factor) < 0.2
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            selectedZoom = factor
-                        } label: {
-                            Text(factor == 1.0 ? "1x" : String(format: "%.1fx", factor))
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundStyle(isSelected ? Color.black : Color.white)
-                                .frame(width: 44, height: 32)
-                                .background(
-                                    Capsule()
-                                        .fill(isSelected ? Color.white : Color.black.opacity(0.5))
-                                )
-                                .overlay(
-                                    Capsule()
-                                        .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8)
-                                )
+                    // Zoom Pills (1x / 1.5x / 2.5x)
+                    HStack(spacing: 10) {
+                        ForEach([1.0, 1.5, 2.5], id: \.self) { factor in
+                            let isSelected = abs(selectedZoom - factor) < 0.2
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                selectedZoom = factor
+                            } label: {
+                                Text(factor == 1.0 ? "1x" : String(format: "%.1fx", factor))
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(isSelected ? Color(.systemBackground) : Color.primary)
+                                    .frame(width: 44, height: 30)
+                                    .background(
+                                        Capsule()
+                                            .fill(isSelected ? Color.primary : Color.primary.opacity(0.08))
+                                    )
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
+                    }
+
+                    if let photoErrorMessage {
+                        Text(photoErrorMessage)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.red.opacity(0.88)))
                     }
                 }
-                .padding(.top, 24)
-
-                if let photoErrorMessage {
-                    Text(photoErrorMessage)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.red.opacity(0.85)))
-                        .padding(.top, 14)
-                }
+                .padding(.vertical, 32)
+                .padding(.horizontal, 20)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                        )
+                )
+                .padding(.horizontal, 16)
 
                 Spacer()
 
@@ -87,15 +99,16 @@ struct QRScannerView: View {
                         VStack(spacing: 6) {
                             ZStack {
                                 Circle()
-                                    .fill(.ultraThinMaterial)
+                                    .fill(Color(.secondarySystemGroupedBackground))
                                     .frame(width: 50, height: 50)
+                                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75))
                                 Image(systemName: "photo.on.rectangle")
                                     .font(.system(size: 19, weight: .semibold))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(.primary)
                             }
                             Text("相册")
                                 .font(.caption2.weight(.medium))
-                                .foregroundStyle(.white.opacity(0.9))
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
@@ -110,15 +123,15 @@ struct QRScannerView: View {
                                 Text("使用连接码配对")
                                     .font(.subheadline.weight(.semibold))
                             }
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.primary)
                             .padding(.horizontal, 20)
                             .frame(height: 50)
                             .background(
                                 Capsule()
-                                    .fill(.ultraThinMaterial)
+                                    .fill(Color(.secondarySystemGroupedBackground))
                                     .overlay(
                                         Capsule()
-                                            .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.8)
+                                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
                                     )
                             )
                         }
@@ -132,20 +145,21 @@ struct QRScannerView: View {
                         VStack(spacing: 6) {
                             ZStack {
                                 Circle()
-                                    .fill(torchOn ? AnyShapeStyle(Color.yellow) : AnyShapeStyle(.ultraThinMaterial))
+                                    .fill(torchOn ? Color.yellow : Color(.secondarySystemGroupedBackground))
                                     .frame(width: 50, height: 50)
+                                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75))
                                 Image(systemName: torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                                     .font(.system(size: 19, weight: .semibold))
-                                    .foregroundStyle(torchOn ? .black : .white)
+                                    .foregroundStyle(torchOn ? .black : .primary)
                             }
                             Text("手电筒")
                                 .font(.caption2.weight(.medium))
-                                .foregroundStyle(.white.opacity(0.9))
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.bottom, 36)
+                .padding(.bottom, 28)
             }
         }
         .onChange(of: selectedPhotoItem) { _, newValue in
@@ -232,7 +246,7 @@ private struct ScannerCornerBrackets: Shape {
     }
 }
 
-private struct QRScannerCameraRepresentable: UIViewControllerRepresentable {
+struct QRScannerCameraRepresentable: UIViewControllerRepresentable {
     @Binding var zoomFactor: CGFloat
     @Binding var torchOn: Bool
     let onCode: (String) -> Void

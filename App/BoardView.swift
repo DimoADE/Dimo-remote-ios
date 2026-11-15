@@ -8,6 +8,7 @@ struct BoardView: View {
     let client: HostClient
 
     @Environment(WorkspaceNavigationStore.self) private var navStore
+    @Environment(AppAppearanceStore.self) private var appearance
     @State private var projects: [ProjectSummary] = []
     @State private var selectedTarget: String = "global"
     @State private var didApplyInitialScope = false
@@ -21,9 +22,9 @@ struct BoardView: View {
 
     private var scopeLabel: String {
         if selectedTarget == "global" {
-            return "全局"
+            return appearance.l("全局", "Global")
         }
-        return selectedProject?.displayName ?? "当前项目"
+        return selectedProject?.displayName ?? appearance.l("当前项目", "Project")
     }
 
     private var scopeIcon: String {
@@ -42,14 +43,14 @@ struct BoardView: View {
                 refreshTrigger: usageRefreshTrigger
             )
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("看板")
+            .navigationTitle(appearance.l("看板", "Board"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     scopeSelectorMenu
                 }
                 ToolbarItem(placement: .principal) {
-                    Text("看板")
+                    Text(appearance.l("看板", "Board"))
                         .font(.headline.weight(.semibold))
                 }
                 ToolbarItem(placement: .topBarTrailing) {

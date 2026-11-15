@@ -18,6 +18,16 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
         }
     }
 
+    func localizedTitle(english: Bool) -> String {
+        guard english else { return title }
+        switch self {
+        case .conversations: return "Chats"
+        case .board: return "Board"
+        case .space: return "Collab"
+        case .settings: return "Settings"
+        }
+    }
+
     var icon: String {
         switch self {
         case .conversations: return "bubble.left"
@@ -42,6 +52,7 @@ struct RootTabView: View {
     @Environment(AppAppearanceStore.self) private var appearance
     @State private var navStore = WorkspaceNavigationStore()
     @State private var attentionCenter = CompanionAttentionCenter()
+    @State private var visitedTabs: Set<AppTab> = [.conversations]
 
     private var activeClient: HostClient? {
         guard let profile = servers.activeProfile else { return nil }
@@ -68,19 +79,24 @@ struct RootTabView: View {
             .opacity(navStore.selection == .conversations ? 1 : 0)
             .allowsHitTesting(navStore.selection == .conversations)
 
-            if navStore.selection == .board {
+            if visitedTabs.contains(.board) || navStore.selection == .board {
                 RequiresServer(selection: $bindableNav.selection) { client in
                     BoardView(client: client)
                 }
-                .transition(.opacity)
-            } else if navStore.selection == .space {
+                .opacity(navStore.selection == .board ? 1 : 0)
+                .allowsHitTesting(navStore.selection == .board)
+            }
+            if visitedTabs.contains(.space) || navStore.selection == .space {
                 RequiresServer(selection: $bindableNav.selection) { client in
                     CollaborationSpaceView(client: client)
                 }
-                .transition(.opacity)
-            } else if navStore.selection == .settings {
+                .opacity(navStore.selection == .space ? 1 : 0)
+                .allowsHitTesting(navStore.selection == .space)
+            }
+            if visitedTabs.contains(.settings) || navStore.selection == .settings {
                 SettingsView()
-                    .transition(.opacity)
+                    .opacity(navStore.selection == .settings ? 1 : 0)
+                    .allowsHitTesting(navStore.selection == .settings)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -121,7 +137,7 @@ struct RootTabView: View {
             guard let client = activeClient else { return }
             while !Task.isCancelled {
                 await attentionCenter.poll(client: client)
-                try? await Task.sleep(for: .milliseconds(1500))
+                try? await Task.sleep(for: .milliseconds(3500))
             }
         }
         .dynamicTypeSize(appearance.fontSizePreset.dynamicTypeSize)
@@ -131,6 +147,7 @@ struct RootTabView: View {
             appearance.applyInterfaceStyleToAllWindows(appearance.themeMode.uiInterfaceStyle)
         }
         .onChange(of: navStore.selection) { _, newTab in
+            visitedTabs.insert(newTab)
             dismissKeyboard()
             if newTab == .conversations {
                 NotificationCenter.default.post(name: Notification.Name("vibex.didReturnToConversationsTab"), object: nil)

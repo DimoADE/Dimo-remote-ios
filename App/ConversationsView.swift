@@ -1683,8 +1683,10 @@ struct ConversationsView: View {
     }
 }
 
+private let sharedISO8601Formatter = ISO8601DateFormatter()
+
 private func ISO8061NowString() -> String {
-    ISO8601DateFormatter().string(from: Date())
+    sharedISO8601Formatter.string(from: Date())
 }
 
 private struct WorkspaceSheetTarget: Identifiable {

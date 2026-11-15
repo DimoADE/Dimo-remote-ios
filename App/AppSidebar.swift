@@ -44,6 +44,7 @@ final class WorkspaceNavigationStore {
 /// - On `.board / .space / .settings`: `[ (+ ) ]` animates to zero width & zero gap so the 4 tabs
 ///   smoothly expand to 4 equal widths without leaving any blank space in the middle.
 struct FloatingWorkspaceCapsuleDock: View {
+    @Environment(AppAppearanceStore.self) private var appearance
     @Bindable var navStore: WorkspaceNavigationStore
     var attentionCount: Int = 0
     @Namespace private var tabHighlightNamespace
@@ -129,7 +130,7 @@ struct FloatingWorkspaceCapsuleDock: View {
                     }
                 }
 
-                Text(tab.title)
+                Text(tab.localizedTitle(english: appearance.languageMode == .en))
                     .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
                     .lineLimit(1)
             }

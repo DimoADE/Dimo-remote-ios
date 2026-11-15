@@ -17,6 +17,8 @@ struct SettingsView: View {
     @Environment(WorkspaceNavigationStore.self) private var navStore
     @Environment(AppUpdateStore.self) private var appUpdates
     @State private var path: [SettingsRoute] = []
+    @State private var cacheSizeText: String = ""
+    @State private var cacheClearedBanner = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -32,7 +34,7 @@ struct SettingsView: View {
                             )
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 6) {
-                                    Text(account.isSignedIn ? (account.user?.resolvedDisplayName ?? "VibeX 账号") : "VibeX 账号")
+                                    Text(account.isSignedIn ? (account.user?.resolvedDisplayName ?? appearance.l("VibeX 账号", "VibeX Account")) : appearance.l("VibeX 账号", "VibeX Account"))
                                         .font(.body.weight(.semibold))
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
@@ -49,12 +51,12 @@ struct SettingsView: View {
                                     }
                                 }
                                 if account.isSignedIn, let user = account.user {
-                                    Text("\(user.email ?? user.accountIdentifier ?? user.resolvedDisplayName) · 跨端同步与模型额度")
+                                    Text("\(user.email ?? user.accountIdentifier ?? user.resolvedDisplayName) · \(appearance.l("跨端同步", "Synced"))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                 } else {
-                                    Text("登录以跨端同步电脑、查看订阅与模型额度")
+                                    Text(appearance.l("跨端同步电脑与模型额度", "Sync desktops & model credits"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
@@ -62,9 +64,12 @@ struct SettingsView: View {
                             }
                             Spacer(minLength: 6)
                             if !account.isSignedIn {
-                                Text("未登录")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Text(appearance.l("去登录", "Sign In"))
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                    .foregroundStyle(Color.accentColor)
                             }
                         }
                     }
@@ -79,33 +84,34 @@ struct SettingsView: View {
                                 systemImage: "desktopcomputer",
                                 tint: .blue
                             )
-                            Text("连接")
+                            Text(appearance.l("连接", "Connection"))
                                 .font(.subheadline.weight(.medium))
                             Spacer(minLength: 6)
                             if let active = servers.activeProfile {
+                                let online = servers.isSessionConnected && servers.isOnline
                                 HStack(spacing: 5) {
                                     Circle()
-                                        .fill(Color.green)
+                                        .fill(online ? Color.green : Color.secondary.opacity(0.55))
                                         .frame(width: 6.5, height: 6.5)
                                     Text(active.displayHost)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
-                                    Text(active.channelBadgeText)
+                                    Text(online ? (active.isCloudService ? appearance.l("云中继", "Cloud") : appearance.l("局域网", "LAN")) : appearance.l("离线", "Offline"))
                                         .font(.caption2.weight(.semibold))
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 1.5)
                                         .background(
                                             Capsule().fill(
-                                                active.isCloudService
+                                                online && active.isCloudService
                                                     ? Color.accentColor.opacity(0.14)
                                                     : Color.secondary.opacity(0.12)
                                             )
                                         )
-                                        .foregroundStyle(active.isCloudService ? Color.accentColor : .secondary)
+                                        .foregroundStyle(online && active.isCloudService ? Color.accentColor : .secondary)
                                 }
                             } else {
-                                Text("未连接")
+                                Text(appearance.l("未连接", "Disconnected"))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -119,10 +125,10 @@ struct SettingsView: View {
                                 systemImage: "sparkles.rectangle.stack.fill",
                                 tint: .purple
                             )
-                            Text("技能与扩展")
+                            Text(appearance.l("技能与扩展", "Skills & Extensions"))
                                 .font(.subheadline.weight(.medium))
                             Spacer()
-                            Text("技能 · MCP · 插件")
+                            Text(appearance.l("技能 · MCP · 插件", "Skills · MCP · Plugins"))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -137,20 +143,42 @@ struct SettingsView: View {
                             systemImage: appearance.themeMode.icon,
                             tint: .indigo
                         )
-                        Text("主题")
+                        Text(appearance.l("主题", "Theme"))
                             .font(.subheadline.weight(.medium))
                         Spacer(minLength: 8)
-                        Picker("主题", selection: Binding(
+                        Picker(appearance.l("主题", "Theme"), selection: Binding(
                             get: { appearance.themeMode },
                             set: { appearance.setThemeModeWithTopRightReveal($0) }
                         )) {
                             ForEach(AppThemeMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
+                                Text(mode.localizedTitle(english: appearance.languageMode == .en)).tag(mode)
                             }
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .frame(maxWidth: 210)
+                        .frame(maxWidth: 186)
+                    }
+                    .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
+
+                    HStack(spacing: 10) {
+                        settingsIconBadge(
+                            systemImage: "globe",
+                            tint: .blue
+                        )
+                        Text(appearance.l("语言", "Language"))
+                            .font(.subheadline.weight(.medium))
+                        Spacer(minLength: 8)
+                        Picker(appearance.l("语言", "Language"), selection: Binding(
+                            get: { appearance.languageMode },
+                            set: { appearance.languageMode = $0 }
+                        )) {
+                            ForEach(AppLanguageMode.allCases) { lang in
+                                Text(lang.title).tag(lang)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 164)
                     }
                     .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
 
@@ -160,10 +188,10 @@ struct SettingsView: View {
                                 systemImage: "textformat.size",
                                 tint: .orange
                             )
-                            Text("字体")
+                            Text(appearance.l("字体", "Font"))
                                 .font(.subheadline.weight(.medium))
                             Spacer()
-                            Text("\(appearance.fontStylePreset.shortTitle) · \(appearance.fontSizePreset.title)")
+                            Text("\(appearance.fontStylePreset.localizedShortTitle(english: appearance.languageMode == .en)) · \(appearance.fontSizePreset.localizedTitle(english: appearance.languageMode == .en))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -176,26 +204,71 @@ struct SettingsView: View {
                                 systemImage: "bell.badge.fill",
                                 tint: .red
                             )
-                            Text("通知")
+                            Text(appearance.l("通知", "Notifications"))
                                 .font(.subheadline.weight(.medium))
                             Spacer()
-                            Text(appearance.systemNotificationStatusText)
+                            Text(appearance.systemNotificationStatusTextLocalized)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
+
+                    HStack(spacing: 10) {
+                        settingsIconBadge(
+                            systemImage: "shield.lefthalf.filled",
+                            tint: .green
+                        )
+                        Toggle(isOn: Binding(
+                            get: { appearance.confirmHighRiskApproval },
+                            set: { appearance.confirmHighRiskApproval = $0 }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(appearance.l("高危审批保护", "Approval Guard"))
+                                    .font(.subheadline.weight(.medium))
+                                Text(appearance.l("允许命令与文件操作前二次确认", "Confirm before allowing commands"))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
                 }
 
-                // 4. 关于 VibeX
+                // 4. 清理缓存 & 关于 Dimo
                 Section {
+                    Button {
+                        clearLocalCache()
+                    } label: {
+                        HStack(spacing: 10) {
+                            settingsIconBadge(
+                                systemImage: "trash.fill",
+                                tint: .orange
+                            )
+                            Text(appearance.l("清理缓存", "Clear Cache"))
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if cacheClearedBanner {
+                                Text(appearance.l("已清理", "Cleared"))
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.green)
+                            } else if !cacheSizeText.isEmpty {
+                                Text(cacheSizeText)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
+
                     NavigationLink(value: SettingsRoute.about) {
                         HStack(spacing: 10) {
                             settingsIconBadge(
                                 systemImage: "info.circle.fill",
                                 tint: .teal
                             )
-                            Text("关于 VibeX")
+                            Text(appearance.l("关于 Dimo", "About Dimo"))
                                 .font(.subheadline.weight(.medium))
                             Spacer()
                             if appUpdates.hasUpdate, let release = appUpdates.latestRelease {
@@ -215,10 +288,13 @@ struct SettingsView: View {
                     .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
                 }
             }
+            .task {
+                cacheSizeText = Self.computeCacheSizeString()
+            }
             .listSectionSpacing(10)
             .contentMargins(.top, 4, for: .scrollContent)
             .safeAreaPadding(.bottom, WorkspaceNavigationStore.bottomDockClearance)
-            .navigationTitle("设置")
+            .navigationTitle(appearance.l("设置", "Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
@@ -247,6 +323,54 @@ struct SettingsView: View {
 
     private var currentVersionLabel: String {
         "v\(appUpdates.currentVersion)"
+    }
+
+    private func clearLocalCache() {
+        URLCache.shared.removeAllCachedResponses()
+        let fm = FileManager.default
+        let tmpDir = fm.temporaryDirectory
+        if let items = try? fm.contentsOfDirectory(at: tmpDir, includingPropertiesForKeys: nil) {
+            for item in items {
+                try? fm.removeItem(at: item)
+            }
+        }
+        if let cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first,
+           let items = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil)
+        {
+            for item in items {
+                try? fm.removeItem(at: item)
+            }
+        }
+        cacheSizeText = Self.computeCacheSizeString()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        withAnimation {
+            cacheClearedBanner = true
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.8))
+            withAnimation {
+                cacheClearedBanner = false
+            }
+        }
+    }
+
+    private static func computeCacheSizeString() -> String {
+        var bytes = Int64(URLCache.shared.currentDiskUsage)
+        let fm = FileManager.default
+        let dirs = [
+            fm.temporaryDirectory,
+            fm.urls(for: .cachesDirectory, in: .userDomainMask).first,
+        ].compactMap { $0 }
+        for dir in dirs {
+            if let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
+                for case let fileURL as URL in enumerator {
+                    if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                        bytes += Int64(size)
+                    }
+                }
+            }
+        }
+        return ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
     }
 
     private func settingsIconBadge(systemImage: String, tint: Color) -> some View {
@@ -479,6 +603,18 @@ struct PairedComputersSettingsView: View {
                     }
                 }
             }
+
+            Section {
+                TextField("https://relay.example.com", text: Bindable(servers).customRelayOrigin)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .font(.subheadline.monospaced())
+            } header: {
+                Text("自建云节点（可选）")
+            } footer: {
+                Text("填写后，扫码配对时可选择使用官方云服务或你的自建节点；未填写则默认局域网优先。")
+            }
         }
         .navigationTitle("连接")
         .navigationBarTitleDisplayMode(.inline)
@@ -489,7 +625,7 @@ struct PairedComputersSettingsView: View {
             await servers.refreshActiveTelemetry()
         }
         .sheet(isPresented: $showingPairSheet) {
-            PairView(startWithScanner: false, initialOrigin: servers.activeProfile?.origin)
+            PairView(startWithScanner: true, initialOrigin: servers.activeProfile?.origin)
         }
     }
 
@@ -1521,76 +1657,91 @@ struct FontSettingsDetailView: View {
 
 struct NotificationSettingsDetailView: View {
     @Environment(AppAppearanceStore.self) private var appearance
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var bindableAppearance = appearance
         Form {
-            Section("系统推送权限") {
+            Section(appearance.l("系统推送权限", "System Permission")) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("iOS 系统通知状态")
-                            .font(.body.weight(.medium))
-                        Text(appearance.systemNotificationStatusText)
-                            .font(.caption)
+                    Text(appearance.l("iOS 系统通知", "iOS Notifications"))
+                        .font(.body.weight(.medium))
+                    Spacer()
+                    switch appearance.notificationAuthorizationStatus {
+                    case .authorized, .provisional, .ephemeral:
+                        Text(appearance.l("已开启", "Enabled"))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.green)
+                    case .denied:
+                        Button(appearance.l("前往系统设置", "Open Settings")) {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .font(.subheadline.weight(.medium))
+                    case .notDetermined:
+                        Text(appearance.l("未开启", "Not Set"))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    @unknown default:
+                        Text(appearance.systemNotificationStatusTextLocalized)
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Button("请求/刷新权限") {
-                        Task {
-                            await appearance.requestSystemNotificationPermission()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
                 }
             }
 
-            Section("事件提醒") {
-                Toggle("任务完成通知", isOn: $bindableAppearance.notifyTurnCompleted)
-                Toggle("权限审批与提问提醒", isOn: $bindableAppearance.notifyApprovalRequired)
-                Toggle("协作空间 @ 与新消息通知", isOn: $bindableAppearance.notifyCollabMessages)
+            Section(appearance.l("事件提醒", "Alerts")) {
+                Toggle(appearance.l("前台静默（使用 App 时不弹横幅）", "Mute in Foreground"), isOn: $bindableAppearance.muteForegroundNotifications)
+                Toggle(appearance.l("任务完成通知", "Task Completed"), isOn: $bindableAppearance.notifyTurnCompleted)
+                Toggle(appearance.l("权限审批与提问提醒", "Approval & Questions"), isOn: $bindableAppearance.notifyApprovalRequired)
+                Toggle(appearance.l("协作空间 @ 与新消息通知", "Collab @ & Messages"), isOn: $bindableAppearance.notifyCollabMessages)
             }
 
-            Section("声音与触感") {
-                Toggle("消息提示音", isOn: $bindableAppearance.notificationSound)
-                Toggle("触感震动反馈 (Haptics)", isOn: $bindableAppearance.hapticFeedback)
+            Section(appearance.l("声音与触感", "Sound & Haptics")) {
+                Toggle(appearance.l("消息提示音", "Notification Sound"), isOn: $bindableAppearance.notificationSound)
+                Toggle(appearance.l("触感震动反馈 (Haptics)", "Haptic Feedback"), isOn: $bindableAppearance.hapticFeedback)
             }
         }
-        .navigationTitle("通知")
+        .navigationTitle(appearance.l("通知", "Notifications"))
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await appearance.refreshNotificationAuthorizationStatus()
+            if appearance.notificationAuthorizationStatus == .notDetermined {
+                await appearance.requestSystemNotificationPermission()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await appearance.refreshNotificationAuthorizationStatus() }
+            }
         }
     }
 }
 
-// MARK: - 7. 关于 VibeX 详情页
+// MARK: - 7. 关于 Dimo 详情页
 
 struct AboutVibeXDetailView: View {
     @Environment(ServerStore.self) private var servers
     @Environment(AppUpdateStore.self) private var appUpdates
+    @Environment(AppAppearanceStore.self) private var appearance
 
     var body: some View {
         List {
             Section {
                 VStack(spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.accentColor, Color.indigo],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 72, height: 72)
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 32, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    Text("VibeX Companion")
+                    Image("dimo_logo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 72, height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                        )
+                    Text("Dimo")
                         .font(.title3.weight(.bold))
-                    Text("本地优先的多智能体研发工作台 iOS 伴侣端")
+                    Text(appearance.l("VibeX 桌面端伴侣客户端", "VibeX Desktop Companion"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1598,13 +1749,17 @@ struct AboutVibeXDetailView: View {
                 .padding(.vertical, 12)
             }
 
-            Section("版本与在线更新") {
-                LabeledContent("iOS 客户端版本", value: "v\(appUpdates.currentVersion) (#\(appUpdates.currentBuild))")
-                LabeledContent("远程通讯协议", value: "Remote Protocol v1")
+            Section(appearance.l("版本与在线更新", "Version & Updates")) {
+                LabeledContent(appearance.l("客户端版本", "Client Version"), value: "v\(appUpdates.currentVersion) (#\(appUpdates.currentBuild))")
                 if let active = servers.activeProfile {
-                    LabeledContent("已连接桌面端", value: active.serverName)
-                    LabeledContent("桌面端版本", value: "v\(active.serverVersion)")
-                    LabeledContent("桌面端地址", value: active.origin)
+                    LabeledContent(appearance.l("已连接桌面端", "Connected Desktop"), value: active.serverName)
+                    LabeledContent(
+                        appearance.l("连接方式", "Connection"),
+                        value: active.isCloudService ? appearance.l("VibeX 云中继 · Beta", "VibeX Cloud Relay · Beta") : appearance.l("LAN 局域网直连", "LAN Direct")
+                    )
+                    if !active.serverVersion.isEmpty {
+                        LabeledContent(appearance.l("桌面端版本", "Desktop Version"), value: "v\(active.serverVersion)")
+                    }
                 }
 
                 Button {
@@ -1618,13 +1773,13 @@ struct AboutVibeXDetailView: View {
                         Image(systemName: appUpdates.hasUpdate ? "arrow.down.app.fill" : "arrow.clockwise")
                             .foregroundStyle(appUpdates.hasUpdate ? Color.red : Color.accentColor)
                         if appUpdates.checking {
-                            Text("正在检查更新…")
+                            Text(appearance.l("正在检查更新…", "Checking for updates…"))
                         } else if appUpdates.hasUpdate, let release = appUpdates.latestRelease {
-                            Text("发现新版本 v\(release.version) · 前往 TestFlight 更新")
+                            Text(appearance.l("发现新版本 v\(release.version) · 前往 TestFlight 更新", "Update v\(release.version) available"))
                                 .fontWeight(.semibold)
                                 .foregroundStyle(Color.red)
                         } else {
-                            Text("检查更新")
+                            Text(appearance.l("检查更新", "Check for Updates"))
                                 .fontWeight(.medium)
                         }
                         Spacer()
@@ -1641,15 +1796,8 @@ struct AboutVibeXDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-
-            Section("核心能力") {
-                Label("实时同步桌面端项目与会话流", systemImage: "bubble.left.and.bubble.right.fill")
-                Label("四列敏捷看板与 Token 用量统计", systemImage: "square.grid.2x2.fill")
-                Label("多 Bot 协作空间与动态 3D 表情头像", systemImage: "person.2.fill")
-                Label("工作区文件树浏览与代码预览", systemImage: "folder.fill")
-            }
         }
-        .navigationTitle("关于 VibeX")
+        .navigationTitle(appearance.l("关于 Dimo", "About Dimo"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }

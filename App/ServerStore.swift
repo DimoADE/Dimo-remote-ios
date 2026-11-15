@@ -12,17 +12,21 @@ struct ServerProfile: Codable, Identifiable, Hashable {
     var hostId: String? = nil
     var hostName: String? = nil
 
-    var isCloudService: Bool {
+    static func isCloudOrigin(_ origin: String) -> Bool {
         let lower = origin.lowercased()
         return lower.contains("/t/") || lower.hasPrefix("https://")
     }
 
+    var isCloudService: Bool {
+        ServerProfile.isCloudOrigin(origin)
+    }
+
     var channelBadgeText: String {
-        isCloudService ? "云服务 Beta" : "局域网"
+        isCloudService ? "云中继" : "局域网"
     }
 
     var transportChannelLabel: String {
-        isCloudService ? "VibeX 云服务 · Beta" : "LAN 局域网直连"
+        isCloudService ? "VibeX 云中继 · Beta" : "LAN 局域网直连"
     }
 
     var displayHost: String {
@@ -75,12 +79,41 @@ struct ConnectedSasNotice: Identifiable, Equatable {
     let sasCode: String
 }
 
+enum CloudNodePreference: Equatable {
+    case auto
+    case official
+    case custom(String)
+}
+
 @Observable
 final class ServerStore {
     private(set) var profiles: [ServerProfile]
     private let defaults: UserDefaults
     private static let key = "server-profiles"
     private static let autoConnectKey = "server-auto-connect"
+    private static let customRelayKey = "vibex.customRelayOrigin"
+
+    var customRelayOrigin: String {
+        didSet {
+            let normalized = Self.normalizeOrigin(customRelayOrigin)
+            if normalized != customRelayOrigin {
+                customRelayOrigin = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Self.customRelayKey)
+        }
+    }
+
+    var hasCustomRelayNode: Bool {
+        !customRelayOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func isCustomRelayOrigin(_ origin: String) -> Bool {
+        guard hasCustomRelayNode else { return false }
+        let normalized = Self.normalizeOrigin(origin)
+        let customBase = Self.normalizeOrigin(customRelayOrigin)
+        return normalized == customBase || normalized.hasPrefix("\(customBase)/")
+    }
 
     // Auto-connect switch (whether to automatically connect to paired computer on launch)
     var autoConnect: Bool {
@@ -113,12 +146,18 @@ final class ServerStore {
     private var sasNoticeTask: Task<Void, Never>?
     private var declinedCloudFallbackProfileIds = Set<String>()
     weak var accountStore: VibeXAccountStore?
+    private(set) var isCloudRelayAuthorized: Bool = false
+
+    func setCloudRelayAuthorized(_ authorized: Bool) {
+        isCloudRelayAuthorized = authorized
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let decoded = (defaults.data(forKey: Self.key))
             .flatMap { try? JSONDecoder().decode([ServerProfile].self, from: $0) } ?? []
         self.profiles = decoded
+        self.customRelayOrigin = Self.normalizeOrigin(defaults.string(forKey: Self.customRelayKey) ?? "")
         let savedAutoConnect = defaults.object(forKey: Self.autoConnectKey) as? Bool ?? true
         self.autoConnect = savedAutoConnect
         self.isSessionConnected = savedAutoConnect || decoded.isEmpty
@@ -276,6 +315,7 @@ final class ServerStore {
         manualOrigin: String = "",
         deviceName: String,
         replaceExistingMobile: Bool = false,
+        cloudPreference: CloudNodePreference = .auto,
         onConflict: @escaping @MainActor (PendingMobileConflict) -> Void
     ) async throws {
         let client = PairingClient()
@@ -295,29 +335,112 @@ final class ServerStore {
                 for reach in invitation.reachability where reach.origin.contains("/t/") {
                     PairingClient.rememberRelayBase(reach.origin)
                 }
+                let allowOfficialCloud = accountStore?.canUseCloudRelay == true
+                let customBase: String? = {
+                    switch cloudPreference {
+                    case let .custom(url):
+                        let norm = Self.normalizeOrigin(url)
+                        return norm.isEmpty ? nil : norm
+                    case .auto:
+                        return hasCustomRelayNode ? customRelayOrigin : nil
+                    case .official:
+                        return nil
+                    }
+                }()
+                let allowCloud = allowOfficialCloud || customBase != nil
                 let directOriginText = manualOrigin.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !directOriginText.isEmpty, let directOrigin = try? HostOrigin.parse(directOriginText) {
+                if !directOriginText.isEmpty,
+                   let directOrigin = try? HostOrigin.parse(directOriginText),
+                   allowCloud || !ServerProfile.isCloudOrigin(directOrigin.value)
+                {
                     session = try await client.redeem(
                         origin: directOrigin,
                         pairingToken: invitation.pairing_token,
                         deviceName: deviceName,
                         replaceExistingMobile: replaceExistingMobile
                     )
-                } else {
+                } else if case let .custom(customNode) = cloudPreference {
+                    let normCustom = Self.normalizeOrigin(customNode)
+                    let hostId = invitation.host_id.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let customOriginText = normCustom.contains("/t/") || hostId.isEmpty ? normCustom : "\(normCustom)/t/\(hostId)"
+                    if let parsedCustom = try? HostOrigin.parse(customOriginText) {
+                        session = try await client.redeem(
+                            origin: parsedCustom,
+                            pairingToken: invitation.pairing_token,
+                            deviceName: deviceName,
+                            replaceExistingMobile: replaceExistingMobile
+                        )
+                    } else {
+                        throw PairingError.missingInput("自建云节点地址格式无效")
+                    }
+                } else if allowOfficialCloud {
                     session = try await client.redeem(
                         invitation: invitation,
                         deviceName: deviceName,
                         replaceExistingMobile: replaceExistingMobile
                     )
+                } else {
+                    let lanReachability = invitation.reachability.filter { !ServerProfile.isCloudOrigin($0.origin) }
+                    guard !lanReachability.isEmpty else {
+                        throw PairingError.missingInput("云中继连接需要先登录 VibeX 账号，或请确保手机与电脑在同一局域网")
+                    }
+                    var lastError: Error = PairingError.unreachable
+                    var lanSession: CompanionSession?
+                    for reach in lanReachability {
+                        guard let parsed = try? HostOrigin.parse(reach.origin) else { continue }
+                        do {
+                            lanSession = try await client.redeem(
+                                origin: parsed,
+                                pairingToken: invitation.pairing_token,
+                                deviceName: deviceName,
+                                replaceExistingMobile: replaceExistingMobile
+                            )
+                            break
+                        } catch let err as PairingError {
+                            lastError = err
+                            switch err {
+                            case .codeAlreadyUsed, .codeExpired, .codeInvalid, .notCompanionInvitation, .mobileDeviceConflict:
+                                throw err
+                            default:
+                                continue
+                            }
+                        } catch {
+                            lastError = error
+                            continue
+                        }
+                    }
+                    guard let matched = lanSession else {
+                        throw lastError
+                    }
+                    session = matched
                 }
             } else {
+                let allowOfficialCloud = accountStore?.canUseCloudRelay == true
+                let customNodeBase: String? = {
+                    switch cloudPreference {
+                    case let .custom(url):
+                        let norm = Self.normalizeOrigin(url)
+                        return norm.isEmpty ? nil : norm
+                    case .auto:
+                        return hasCustomRelayNode ? customRelayOrigin : nil
+                    case .official:
+                        return nil
+                    }
+                }()
+                let allowCloud = allowOfficialCloud || customNodeBase != nil
                 var candidateUrls: [String] = []
                 func appendCandidate(_ raw: String) {
                     let normalized = Self.normalizeOrigin(raw)
                     guard !normalized.isEmpty, !candidateUrls.contains(normalized) else { return }
+                    if ServerProfile.isCloudOrigin(normalized) && !allowOfficialCloud && !isCustomRelayOrigin(normalized) {
+                        return
+                    }
                     candidateUrls.append(normalized)
                 }
 
+                if case let .custom(customNode) = cloudPreference {
+                    appendCandidate(customNode)
+                }
                 if !manualOrigin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     appendCandidate(manualOrigin)
                 }
@@ -517,11 +640,59 @@ final class ServerStore {
     }
 
     @MainActor
+    func handleAccountSignOut() {
+        isCloudRelayAuthorized = false
+        if activeProfile?.isCloudService == true {
+            isOnline = false
+            realtimeRttMs = nil
+            connectionFailureReason = "请登录 VibeX 账号"
+        }
+        Task { @MainActor [weak self] in
+            await self?.refreshActiveTelemetry()
+        }
+    }
+
+    @MainActor
     func refreshActiveTelemetry() async {
         guard let active = activeProfile else {
             isOnline = false
             realtimeRttMs = nil
             connectionFailureReason = nil
+            return
+        }
+
+        let canUseCloud = accountStore?.canUseCloudRelay == true || isCustomRelayOrigin(active.origin)
+        if active.isCloudService && !canUseCloud {
+            // Cloud relay requires an active signed-in VibeX account; only allow LAN fallback.
+            if let hostId = active.hostId, !hostId.isEmpty {
+                let candidates = await PairingClient.resolveHostRendezvous(
+                    hostId: hostId,
+                    knownOrigins: profiles.map(\.origin)
+                )
+                for candidate in candidates where !ServerProfile.isCloudOrigin(candidate) {
+                    if let probe = await PairingClient.probeHostHealth(
+                        originUrl: candidate,
+                        timeoutSeconds: 1.5,
+                        expectedHostId: hostId
+                    ) {
+                        if let idx = profiles.firstIndex(where: { $0.id == active.id }) {
+                            profiles[idx].origin = probe.host.origin
+                            profiles[idx].hostName = active.hostName ?? probe.host.displayName
+                            persist()
+                        }
+                        if let updatedActive = activeProfile {
+                            guard await verifyActiveTokenNotRevoked(updatedActive) else { return }
+                        }
+                        isOnline = true
+                        realtimeRttMs = probe.rttMs
+                        connectionFailureReason = nil
+                        return
+                    }
+                }
+            }
+            isOnline = false
+            realtimeRttMs = nil
+            connectionFailureReason = "请登录 VibeX 账号"
             return
         }
 
@@ -755,6 +926,9 @@ final class ServerStore {
     }
 
     func client(for profile: ServerProfile) -> HostClient? {
+        if profile.isCloudService && !isCloudRelayAuthorized && !isCustomRelayOrigin(profile.origin) {
+            return nil
+        }
         guard let origin = try? HostOrigin.parse(profile.origin),
               let token = KeychainStore.read(account: profile.id)
         else { return nil }

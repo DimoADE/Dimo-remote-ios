@@ -27,6 +27,7 @@ struct VibeXCompanionApp: App {
             .environment(account)
             .environment(connectFlow)
             .environment(appUpdates)
+            .environment(\.locale, appearance.effectiveLocale)
             .task {
                 account.attach(serverStore: servers)
                 appUpdates.checkIfDue()

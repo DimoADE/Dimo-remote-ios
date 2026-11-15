@@ -51,13 +51,13 @@ final class AppUpdateStore {
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0.4.6"
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0.4.7"
     }
 
     var currentBuild: Int {
         let raw = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "5"
-        return Int(raw) ?? 5
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "6"
+        return Int(raw) ?? 6
     }
 
     func checkIfDue() {

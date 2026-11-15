@@ -820,6 +820,8 @@ private struct PermissionBanner: View {
     let respond: (PermissionOption?, Bool) -> Void
 
     @State private var expandedDiffIDs: Set<String> = []
+    @AppStorage("vibex.security.confirmHighRiskApproval") private var confirmHighRiskApproval = true
+    @State private var pendingHighRiskConfirm: (option: PermissionOption, persist: Bool)?
 
     var body: some View {
         let primaryAllow = prompt.resolveAllowOption(for: .once)
@@ -933,7 +935,11 @@ private struct PermissionBanner: View {
                     HStack(spacing: 0) {
                         Button {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            respond(primaryAllow, false)
+                            if confirmHighRiskApproval {
+                                pendingHighRiskConfirm = (primaryAllow, false)
+                            } else {
+                                respond(primaryAllow, false)
+                            }
                         } label: {
                             HStack(spacing: 5) {
                                 if busy {
@@ -959,7 +965,11 @@ private struct PermissionBanner: View {
                                 if let opt = prompt.resolveAllowOption(for: scope) {
                                     Button {
                                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                        respond(opt, scope != .once)
+                                        if confirmHighRiskApproval {
+                                            pendingHighRiskConfirm = (opt, scope != .once)
+                                        } else {
+                                            respond(opt, scope != .once)
+                                        }
                                     } label: {
                                         Text(scope.label)
                                     }
@@ -1014,6 +1024,26 @@ private struct PermissionBanner: View {
         .shadow(color: .black.opacity(0.05), radius: 8, y: 2)
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+        .confirmationDialog(
+            "确认允许执行此操作？",
+            isPresented: Binding(
+                get: { pendingHighRiskConfirm != nil },
+                set: { if !$0 { pendingHighRiskConfirm = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pending = pendingHighRiskConfirm {
+                Button("确认\(pending.option.label)", role: .destructive) {
+                    pendingHighRiskConfirm = nil
+                    respond(pending.option, pending.persist)
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingHighRiskConfirm = nil
+            }
+        } message: {
+            Text(prompt.command ?? prompt.displayHeading)
+        }
     }
 
     private func diffPreviewRow(_ diff: PermissionDiffPreview) -> some View {
