@@ -23,7 +23,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                // 1. VibeX 账号（唯一顶栏个人中心）
+                // 1. Dimo 账号（唯一顶栏个人中心）
                 Section {
                     NavigationLink(value: SettingsRoute.account) {
                         HStack(spacing: 12) {
@@ -34,7 +34,7 @@ struct SettingsView: View {
                             )
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 6) {
-                                    Text(account.isSignedIn ? (account.user?.resolvedDisplayName ?? appearance.l("VibeX 账号", "VibeX Account")) : appearance.l("VibeX 账号", "VibeX Account"))
+                                    Text(account.isSignedIn ? (account.user?.resolvedDisplayName ?? appearance.l("Dimo 账号", "Dimo Account")) : appearance.l("Dimo 账号", "Dimo Account"))
                                         .font(.body.weight(.semibold))
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
@@ -54,12 +54,12 @@ struct SettingsView: View {
                                     Text("\(user.email ?? user.accountIdentifier ?? user.resolvedDisplayName) · \(appearance.l("跨端同步", "Synced"))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
                                 } else {
                                     Text(appearance.l("跨端同步电脑与模型额度", "Sync desktops & model credits"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                        .lineLimit(2)
                                 }
                             }
                             Spacer(minLength: 6)
@@ -1561,7 +1561,7 @@ struct FontSettingsDetailView: View {
             Section("实时预览") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("VibeX 字体与排版预览")
+                        Text("Dimo 字体与排版预览")
                             .font(.system(size: appearance.fontSizePreset.pointPreviewSize + 2, weight: .semibold, design: appearance.fontStylePreset.fontDesign))
                         Spacer()
                         Text("\(appearance.fontSizePreset.title) · \(appearance.fontSizePreset.scaleLabel)")
@@ -1741,7 +1741,7 @@ struct AboutVibeXDetailView: View {
                         )
                     Text("Dimo")
                         .font(.title3.weight(.bold))
-                    Text(appearance.l("VibeX 桌面端伴侣客户端", "VibeX Desktop Companion"))
+                    Text(appearance.l("Dimo 桌面端伴侣客户端", "Dimo Desktop Companion"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1755,7 +1755,7 @@ struct AboutVibeXDetailView: View {
                     LabeledContent(appearance.l("已连接桌面端", "Connected Desktop"), value: active.serverName)
                     LabeledContent(
                         appearance.l("连接方式", "Connection"),
-                        value: active.isCloudService ? appearance.l("VibeX 云中继 · Beta", "VibeX Cloud Relay · Beta") : appearance.l("LAN 局域网直连", "LAN Direct")
+                        value: active.isCloudService ? appearance.l("Dimo 云中继 · Beta", "Dimo Cloud Relay · Beta") : appearance.l("LAN 局域网直连", "LAN Direct")
                     )
                     if !active.serverVersion.isEmpty {
                         LabeledContent(appearance.l("桌面端版本", "Desktop Version"), value: "v\(active.serverVersion)")

@@ -1013,7 +1013,7 @@ struct ConversationsView: View {
                     HStack(spacing: 5.5) {
                         Image(systemName: "laptopcomputer")
                             .font(.system(size: 13.5, weight: .medium))
-                        Text(servers.activeProfile?.displayHost ?? "VibeX 桌面端")
+                        Text(servers.activeProfile?.displayHost ?? "Dimo 桌面端")
                             .font(.system(size: 14, weight: .medium))
                             .lineLimit(1)
                         Image(systemName: "chevron.right")

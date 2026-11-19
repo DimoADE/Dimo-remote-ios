@@ -35,7 +35,7 @@ public struct DiscoveredLanHost: Identifiable, Equatable, Sendable {
 
     public var displayName: String {
         let cleaned = name.replacingOccurrences(of: ".local", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "VibeX 桌面端" : cleaned
+        return (cleaned.isEmpty || AccountDesktop.isGenericName(cleaned)) ? "Dimo 桌面端" : cleaned
     }
 
     public init(origin: String, hostId: String?, name: String) {
@@ -123,13 +123,13 @@ public enum PairingError: Error, Equatable, LocalizedError {
         case .unreachable:
             return "无法连接到电脑，请确认电脑端在线并已开启远程连接"
         case .hostCloudServiceOff:
-            return "电脑未开启云服务。请连接与电脑相同的 Wi-Fi，或在电脑上登录 VibeX 账号"
+            return "电脑未开启云服务。请连接与电脑相同的 Wi-Fi，或在电脑上登录 Dimo 账号"
         case .accountMismatch:
-            return "这台电脑登录的是其他 VibeX 账号"
+            return "这台电脑登录的是其他 Dimo 账号"
         case .accountTokenInvalid:
             return "登录状态已失效，请重新登录"
         case .hostAccountSignedOut:
-            return "这台电脑未登录 VibeX 账号"
+            return "这台电脑未登录 Dimo 账号"
         case .accountVerificationUnavailable:
             return "暂时无法验证账号，请稍后重试"
         case .connectRejected:
@@ -170,7 +170,8 @@ private final class RelayBaseRegistry: @unchecked Sendable {
     }
 
     func remember(_ originOrBaseUrl: String) {
-        var trimmed = originOrBaseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = PairingClient.migrateLegacyRelayOrigin(originOrBaseUrl)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
         guard trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") else {
             return
@@ -187,15 +188,16 @@ private final class RelayBaseRegistry: @unchecked Sendable {
             let port = comps.port.map { ":\($0)" } ?? ""
             base = "\(scheme)://\(host)\(port)"
         }
-        guard !base.isEmpty,
-              !base.contains("127.0.0.1"),
-              !base.contains("localhost"),
-              !base.contains(":17890")
+        let migratedBase = PairingClient.migrateLegacyRelayOrigin(base)
+        guard !migratedBase.isEmpty,
+              !migratedBase.contains("127.0.0.1"),
+              !migratedBase.contains("localhost"),
+              !migratedBase.contains(":17890")
         else { return }
         lock.lock()
         defer { lock.unlock() }
-        if !bases.contains(base) {
-            bases.append(base)
+        if !bases.contains(migratedBase) {
+            bases.append(migratedBase)
         }
     }
 
@@ -211,20 +213,41 @@ private final class RelayBaseRegistry: @unchecked Sendable {
 
 public struct PairingClient: Sendable {
     public static let clientProtocolVersion = "1.0"
-    public static let protocolHeader = "x-vibex-protocol-version"
+    public static let protocolHeader = "x-dimo-protocol-version"
     public static var defaultOfficialRelayBase: String {
-        if let env = ProcessInfo.processInfo.environment["VIBEX_RELAY_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !env.isEmpty
-        {
-            return env
+        for envKey in ["DIMO_RELAY_URL", "VIBEX_RELAY_URL"] {
+            if let env = ProcessInfo.processInfo.environment[envKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !env.isEmpty
+            {
+                return migrateLegacyRelayOrigin(env)
+            }
         }
         if let plist = Bundle.main.object(forInfoDictionaryKey: "VIBEXRelayURL") as? String {
             let trimmed = plist.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
-                return trimmed
+                return migrateLegacyRelayOrigin(trimmed)
             }
         }
-        return "https://vibex.xforever.xin"
+        return "https://dimo-ai.com"
+    }
+
+    public static func migrateLegacyRelayOrigin(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var comps = URLComponents(string: trimmed),
+              let scheme = comps.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              comps.host?.lowercased() == "vibex.xforever.xin"
+        else {
+            return raw
+        }
+        comps.scheme = "https"
+        comps.host = "dimo-ai.com"
+        comps.port = nil
+        guard var rebuilt = comps.string else { return raw }
+        while rebuilt.hasSuffix("/") {
+            rebuilt.removeLast()
+        }
+        return rebuilt
     }
 
     private let transport: HttpTransport
@@ -566,10 +589,12 @@ public struct PairingClient: Sendable {
             }
         }
 
+        #if targetEnvironment(simulator)
         let localPorts = Array(NSOrderedSet(array: [port, 17899] + Array(17891...17899))) as? [Int] ?? [port]
         for localPort in localPorts {
             addCandidate("http://127.0.0.1:\(localPort)")
         }
+        #endif
 
         let lanPorts = port == 17899 ? [17899] : [port, 17899]
         for (prefix, selfHost) in localPrivateIPv4Subnets() {
@@ -661,7 +686,7 @@ public struct PairingClient: Sendable {
                 if let origin = payload.origin?.trimmingCharacters(in: .whitespacesAndNewlines),
                    origin.hasPrefix("http://") || origin.hasPrefix("https://")
                 {
-                    appendUnique(origin)
+                    appendUnique(migrateLegacyRelayOrigin(origin))
                 }
                 if let hostId = payload.host_id?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !hostId.isEmpty
@@ -684,53 +709,12 @@ public struct PairingClient: Sendable {
         guard !bases.isEmpty else { return [] }
 
         var resolved: [String] = []
-        func appendUnique(_ origin: String) {
-            if !resolved.contains(origin) {
-                resolved.append(origin)
-            }
-        }
-
         for base in bases {
-            var cleanBase = base
+            var cleanBase = migrateLegacyRelayOrigin(base)
             while cleanBase.hasSuffix("/") { cleanBase.removeLast() }
-            appendUnique("\(cleanBase)/t/\(cleanId)")
-        }
-
-        let digest = SHA256.hash(data: Data("vibex-host-v1:\(cleanId)".utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        let topic = "vbx-h-\(hex.prefix(32))"
-
-        struct BeaconResponse: Decodable {
-            struct Entry: Decodable {
-                struct Payload: Decodable {
-                    let host_id: String?
-                    let origin: String?
-                }
-                let payload: Payload?
-            }
-            let entries: [Entry]?
-        }
-
-        for base in bases {
-            var cleanBase = base
-            while cleanBase.hasSuffix("/") { cleanBase.removeLast() }
-            guard let url = URL(string: "\(cleanBase)/v1/beacon/\(topic)") else { continue }
-            var request = URLRequest(url: url, timeoutInterval: timeoutSeconds)
-            request.httpMethod = "GET"
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse,
-                  (200...299).contains(http.statusCode),
-                  let decoded = try? JSONDecoder().decode(BeaconResponse.self, from: data)
-            else { continue }
-
-            for entry in decoded.entries ?? [] {
-                guard let payload = entry.payload else { continue }
-                if let recordHostId = payload.host_id, recordHostId != cleanId { continue }
-                if let origin = payload.origin?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   origin.hasPrefix("http://") || origin.hasPrefix("https://")
-                {
-                    appendUnique(origin)
-                }
+            let candidate = "\(cleanBase)/t/\(cleanId)"
+            if !resolved.contains(candidate) {
+                resolved.append(candidate)
             }
         }
         return resolved
@@ -827,9 +811,20 @@ public struct PairingClient: Sendable {
 
 public struct URLSessionTransport: HttpTransport {
     private let session: URLSession
+    private let timeoutOverride: TimeInterval?
 
     public init(session: URLSession = .shared) {
         self.session = session
+        self.timeoutOverride = nil
+    }
+
+    private init(session: URLSession, timeoutOverride: TimeInterval?) {
+        self.session = session
+        self.timeoutOverride = timeoutOverride
+    }
+
+    func withTimeout(_ seconds: TimeInterval) -> URLSessionTransport {
+        URLSessionTransport(session: session, timeoutOverride: seconds)
     }
 
     public func execute(
@@ -838,6 +833,7 @@ public struct URLSessionTransport: HttpTransport {
         headers: [String: String],
         body: Data?
     ) async throws -> HttpExchange {
+        let hadActiveE2eeSession = E2eeSessionManager.shared.isE2eeActive(for: url)
         let exchange = try await executeOnce(
             method: method,
             url: url,
@@ -845,13 +841,14 @@ public struct URLSessionTransport: HttpTransport {
             body: body,
             allowHandshakeBootstrap: true
         )
-        if exchange.status == 412 {
+        if exchange.status == 412 || (exchange.status == 401 && hadActiveE2eeSession) {
+            E2eeSessionManager.shared.clearSession(for: url)
             return try await executeOnce(
                 method: method,
                 url: url,
                 headers: headers,
                 body: body,
-                allowHandshakeBootstrap: false
+                allowHandshakeBootstrap: true
             )
         }
         return exchange
@@ -891,7 +888,10 @@ public struct URLSessionTransport: HttpTransport {
             }
         }
 
-        var request = URLRequest(url: target, timeoutInterval: isPrivateLan ? 15 : 20)
+        let defaultTimeout: TimeInterval = method.uppercased() == "GET"
+            ? (isPrivateLan ? 15 : 25)
+            : 60
+        var request = URLRequest(url: target, timeoutInterval: timeoutOverride ?? defaultTimeout)
         request.httpMethod = method
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         request.setValue(e2ee.clientPublicKeyBase64, forHTTPHeaderField: E2eeSessionManager.headerClientPub)

@@ -57,7 +57,7 @@ final class TaskActivityController {
     /// or the global `CompanionAttentionCenter` background poller.
     func sync(
         conversationID: String = "default",
-        projectName: String = "VibeX",
+        projectName: String = "Dimo",
         title: String,
         tasks: [PlanTask],
         latestToolName: String? = nil,
@@ -230,7 +230,7 @@ final class TaskActivityController {
         return (
             phase: .thinking,
             stageTitle: "准备执行中",
-            stageSubtitle: "VibeX 正在同步工作区状态",
+            stageSubtitle: "Dimo 正在同步工作区状态",
             progress: 0.16
         )
     }

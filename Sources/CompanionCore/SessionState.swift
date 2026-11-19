@@ -204,6 +204,10 @@ public struct SessionState: Equatable, Sendable {
     public var pendingPermissions: [PermissionPrompt] = []
     public var pendingQuestions: [PendingQuestion] = []
     public var isTurnRunning = false
+    /// Id of the turn currently in flight, when the Host reported one.
+    public var inFlightTurnID: String?
+    /// Set by a `rate_limited` turn failure; cleared when a turn completes.
+    public var rateLimit: RateLimitBanner?
 
     public init() {}
 
@@ -250,10 +254,25 @@ public enum SessionStateBuilder {
                 if let id = payload.eventField("question_id")?.stringValue {
                     questions.removeAll { $0.id == id }
                 }
-            case "user_turn_started":
+            case "user_turn_created", "user_turn_started":
                 state.isTurnRunning = true
+                state.rateLimit = nil
+                if let id = payload.eventField("turn_id")?.stringValue ?? payload.eventField("turnId")?.stringValue,
+                   !id.isEmpty {
+                    state.inFlightTurnID = id
+                } else if event.kind == "user_turn_started", state.inFlightTurnID == nil {
+                    state.inFlightTurnID = "running"
+                }
             case "turn_completed", "turn_failed", "turn_cancelled", "turn_interrupted":
                 state.isTurnRunning = false
+                state.inFlightTurnID = nil
+                if event.kind == "turn_completed" {
+                    state.rateLimit = nil
+                } else if event.kind == "turn_failed",
+                          let error = payload.eventField("error"),
+                          let banner = TimelineExtras.rateLimit(from: error, rowID: "end:\(event.sequence)") {
+                    state.rateLimit = banner
+                }
                 pending.removeAll()
                 questions.removeAll()
             default:

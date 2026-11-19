@@ -574,7 +574,36 @@ public struct CollabMessageEnvelope: Decodable, Equatable, Sendable {
     public let to: [String]
     public let published: String?
     public let conversationId: String?
+    public let turnId: String?
+    public let operationId: String?
+    public let streaming: Bool?
     public let reactions: [CollabReaction]
+
+    public init(
+        id: String? = nil,
+        sender: String,
+        content: String,
+        summary: String? = nil,
+        to: [String] = [],
+        published: String? = nil,
+        conversationId: String? = nil,
+        turnId: String? = nil,
+        operationId: String? = nil,
+        streaming: Bool? = nil,
+        reactions: [CollabReaction] = []
+    ) {
+        self.id = id
+        self.sender = sender
+        self.content = content
+        self.summary = summary
+        self.to = to
+        self.published = published
+        self.conversationId = conversationId
+        self.turnId = turnId
+        self.operationId = operationId
+        self.streaming = streaming
+        self.reactions = reactions
+    }
 
     public var isFromUser: Bool {
         let lower = sender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -591,6 +620,11 @@ public struct CollabMessageEnvelope: Decodable, Equatable, Sendable {
         return sender.isEmpty ? "助手" : sender
     }
 
+    public var publishedDate: Date? {
+        guard let published, !published.isEmpty else { return nil }
+        return ConversationListItem.parseDate(published)
+    }
+
     public var recipientLabels: [String] {
         to.compactMap { raw in
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -604,7 +638,11 @@ public struct CollabMessageEnvelope: Decodable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, sender, content, summary, to, published, conversation_id, conversationId, reactions
+        case id, sender, content, summary, to, published, created_at
+        case conversation_id, conversationId
+        case turn_id, turnId
+        case operation_id, operationId
+        case streaming, reactions
     }
 
     public init(from decoder: Decoder) throws {
@@ -614,9 +652,15 @@ public struct CollabMessageEnvelope: Decodable, Equatable, Sendable {
         content = (try? c.decode(String.self, forKey: .content)) ?? ""
         summary = try? c.decodeIfPresent(String.self, forKey: .summary)
         to = (try? c.decode([String].self, forKey: .to)) ?? []
-        published = try? c.decodeIfPresent(String.self, forKey: .published)
+        published = (try? c.decodeIfPresent(String.self, forKey: .published))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .created_at))
         conversationId = (try? c.decodeIfPresent(String.self, forKey: .conversation_id))
             ?? (try? c.decodeIfPresent(String.self, forKey: .conversationId))
+        turnId = (try? c.decodeIfPresent(String.self, forKey: .turn_id))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .turnId))
+        operationId = (try? c.decodeIfPresent(String.self, forKey: .operation_id))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .operationId))
+        streaming = try? c.decodeIfPresent(Bool.self, forKey: .streaming)
         reactions = (try? c.decode([CollabReaction].self, forKey: .reactions)) ?? []
     }
 }
@@ -626,13 +670,41 @@ public struct CollabSpaceMessage: Decodable, Identifiable, Equatable, Sendable {
     public let seq: Int
     public let origin: String?
     public let inReplyTo: String?
+    public let operationId: String?
+    public let turnId: String?
     public let streaming: Bool
     public let receipts: [CollabDeliveryReceipt]
     public let envelope: CollabMessageEnvelope
 
+    public init(
+        rawId: String? = nil,
+        seq: Int,
+        origin: String? = nil,
+        inReplyTo: String? = nil,
+        operationId: String? = nil,
+        turnId: String? = nil,
+        streaming: Bool = false,
+        receipts: [CollabDeliveryReceipt] = [],
+        envelope: CollabMessageEnvelope
+    ) {
+        self.rawId = rawId
+        self.seq = seq
+        self.origin = origin
+        self.inReplyTo = inReplyTo
+        self.operationId = operationId
+        self.turnId = turnId
+        self.streaming = streaming
+        self.receipts = receipts
+        self.envelope = envelope
+    }
+
     public var id: String {
         let candidate = (rawId ?? envelope.id ?? "").replacingOccurrences(of: "vibex://space-message/", with: "")
         return candidate.isEmpty ? "seq-\(seq)" : candidate
+    }
+
+    public var isStreamingDraft: Bool {
+        streaming || id.hasPrefix("draft:") || (rawId?.hasPrefix("draft:") ?? false)
     }
 
     public var isFromUser: Bool {
@@ -655,19 +727,33 @@ public struct CollabSpaceMessage: Decodable, Identifiable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, seq, origin, in_reply_to, inReplyTo, streaming, receipts, envelope
+        case id, seq, origin, in_reply_to, inReplyTo
+        case operation_id, operationId
+        case turn_id, turnId
+        case streaming, receipts, envelope
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        rawId = try? c.decodeIfPresent(String.self, forKey: .id)
+        let decodedEnvelope = try c.decode(CollabMessageEnvelope.self, forKey: .envelope)
+        let decodedRawId = try? c.decodeIfPresent(String.self, forKey: .id)
+        rawId = decodedRawId
         seq = (try? c.decode(Int.self, forKey: .seq)) ?? 0
         origin = try? c.decodeIfPresent(String.self, forKey: .origin)
         inReplyTo = (try? c.decodeIfPresent(String.self, forKey: .in_reply_to))
             ?? (try? c.decodeIfPresent(String.self, forKey: .inReplyTo))
-        streaming = (try? c.decode(Bool.self, forKey: .streaming)) ?? false
+        operationId = (try? c.decodeIfPresent(String.self, forKey: .operationId))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .operation_id))
+            ?? decodedEnvelope.operationId
+        turnId = (try? c.decodeIfPresent(String.self, forKey: .turnId))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .turn_id))
+            ?? decodedEnvelope.turnId
+        let candidateID = decodedRawId ?? decodedEnvelope.id ?? ""
+        streaming = (try? c.decodeIfPresent(Bool.self, forKey: .streaming))
+            ?? decodedEnvelope.streaming
+            ?? candidateID.hasPrefix("draft:")
         receipts = (try? c.decode([CollabDeliveryReceipt].self, forKey: .receipts)) ?? []
-        envelope = try c.decode(CollabMessageEnvelope.self, forKey: .envelope)
+        envelope = decodedEnvelope
     }
 }
 
@@ -735,14 +821,31 @@ public struct CollabCard: Decodable, Identifiable, Equatable, Sendable {
     }
 }
 
+public typealias CollabSpaceMessagePage = CollabMessagesPage
+
 public struct CollabMessagesPage: Decodable, Equatable, Sendable {
     public let messages: [CollabSpaceMessage]
     public let scheduled: [CollabScheduledMessage]
     public let cards: [CollabCard]
     public let conversationId: String?
+    public let hasMoreBefore: Bool
+    public let oldestSeq: Int64?
+
+    public var resolvedOldestSeq: Int64? {
+        if let oldestSeq, oldestSeq > 0 {
+            return oldestSeq
+        }
+        return messages
+            .filter { !$0.isStreamingDraft && $0.seq > 0 }
+            .map { Int64($0.seq) }
+            .min()
+    }
 
     private enum CodingKeys: String, CodingKey {
-        case messages, scheduled, cards, conversationId
+        case messages, scheduled, cards
+        case conversationId, conversation_id
+        case hasMoreBefore, has_more_before
+        case oldestSeq, oldest_seq
     }
 
     public init(from decoder: Decoder) throws {
@@ -750,7 +853,13 @@ public struct CollabMessagesPage: Decodable, Equatable, Sendable {
         messages = (try? c.decode([CollabSpaceMessage].self, forKey: .messages)) ?? []
         scheduled = (try? c.decode([CollabScheduledMessage].self, forKey: .scheduled)) ?? []
         cards = (try? c.decode([CollabCard].self, forKey: .cards)) ?? []
-        conversationId = try? c.decodeIfPresent(String.self, forKey: .conversationId)
+        conversationId = (try? c.decodeIfPresent(String.self, forKey: .conversationId))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .conversation_id))
+        hasMoreBefore = (try? c.decodeIfPresent(Bool.self, forKey: .hasMoreBefore))
+            ?? (try? c.decodeIfPresent(Bool.self, forKey: .has_more_before))
+            ?? false
+        oldestSeq = (try? c.decodeIfPresent(Int64.self, forKey: .oldestSeq))
+            ?? (try? c.decodeIfPresent(Int64.self, forKey: .oldest_seq))
     }
 }
 

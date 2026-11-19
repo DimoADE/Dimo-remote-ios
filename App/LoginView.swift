@@ -113,7 +113,7 @@ struct LoginView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 Text("欢迎回来")
                     .font(.system(size: 24, weight: .bold))
-                Text("登录你的 VibeX 账号")
+                Text("登录你的 Dimo 账号")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             }
