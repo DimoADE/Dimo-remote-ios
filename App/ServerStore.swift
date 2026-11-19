@@ -935,10 +935,11 @@ final class ServerStore {
         if lower.contains("401") || lower.contains("unauthorized") {
             return "连接码不正确或授权已失效，请重试"
         }
-        if lower.contains("502") || lower.contains("503") || lower.contains("504") ||
+        if lower.contains("not currently connected to the relay") ||
+            lower.contains("502") || lower.contains("503") || lower.contains("504") ||
             lower.contains("health check") || lower.contains("tenant") || lower.contains("offline")
         {
-            return "电脑当前离线或未开启云服务连接"
+            return "电脑当前离线或未连接到 Dimo 云中继"
         }
         if error is URLError || lower.contains("timed out") || lower.contains("connect") || lower.contains("network") {
             return "无法连接到电脑，请确认电脑端在线"
@@ -946,7 +947,8 @@ final class ServerStore {
         if raw.contains("http://") || raw.contains("https://") || raw.contains("/t/") {
             return "连接失败，请确认电脑端在线后重试"
         }
-        return raw.isEmpty ? "连接失败，请重试" : raw
+        let cleaned = raw.replacingOccurrences(of: "vibex", with: "Dimo", options: .caseInsensitive)
+        return cleaned.isEmpty ? "连接失败，请重试" : cleaned
     }
 
     static func normalizeOrigin(_ raw: String) -> String {
