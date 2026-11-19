@@ -29,33 +29,35 @@ private final class RecordingTransport: HttpTransport, @unchecked Sendable {
 }
 
 private let deviceLoginJSON = """
-    {"requestId":"req-1","verifier":"ver-1","userCode":"ABCD","verifyUrl":"https://vibex.xforever.xin/desktop/authorize?request=req-1","expiresIn":600,"interval":2}
+    {"requestId":"req-1","verifier":"ver-1","userCode":"ABCD","verifyUrl":"https://dimo-ai.com/desktop/authorize?request=req-1","expiresIn":600,"interval":2}
     """
 
 private func client(_ transport: HttpTransport) -> AccountLoginClient {
-    AccountLoginClient(siteBase: "https://vibex.xforever.xin/", transport: transport, sleep: { _ in })
+    AccountLoginClient(siteBase: "https://dimo-ai.com/", transport: transport, sleep: { _ in })
 }
 
 @Test func passwordLoginPostsPasswordMode() async throws {
     let transport = RecordingTransport([(200, "{}")])
     try await client(transport).signIn(.password(login: "me@example.com", password: "secret-pass"))
     let request = try #require(transport.requests.first)
-    #expect(request.url == "https://vibex.xforever.xin/api/auth/login")
+    #expect(request.url == "https://dimo-ai.com/api/auth/login")
     #expect(request.headers["content-type"] == "application/json")
     #expect(request.json as? [String: String] == ["mode": "password", "login": "me@example.com", "password": "secret-pass"])
 }
 
 @Test func codeLoginPostsCodeMode() async throws {
     let transport = RecordingTransport([(200, "{}")])
-    try await client(transport).signIn(.code(login: "13800000000", code: "123456"))
-    #expect(transport.requests.first?.json as? [String: String] == ["mode": "code", "login": "13800000000", "code": "123456"])
+    try await client(transport).sendLoginCode(to: "me@example.com")
+    let codeTransport = RecordingTransport([(200, "{}")])
+    try await client(codeTransport).signIn(.code(login: "13800000000", code: "123456"))
+    #expect(codeTransport.requests.first?.json as? [String: String] == ["mode": "code", "login": "13800000000", "code": "123456"])
 }
 
 @Test func sendLoginCodeTargetsLoginPurpose() async throws {
     let transport = RecordingTransport([(200, "{}")])
     try await client(transport).sendLoginCode(to: "me@example.com")
     let request = try #require(transport.requests.first)
-    #expect(request.url == "https://vibex.xforever.xin/api/auth/code")
+    #expect(request.url == "https://dimo-ai.com/api/auth/code")
     #expect(request.json as? [String: String] == ["target": "me@example.com", "purpose": "login"])
 }
 
@@ -81,10 +83,10 @@ private func client(_ transport: HttpTransport) -> AccountLoginClient {
     let requests = transport.requests
     #expect(
         requests.map(\.url) == [
-            "https://vibex.xforever.xin/api/auth/desktop/start",
-            "https://vibex.xforever.xin/api/auth/desktop/decide",
-            "https://vibex.xforever.xin/api/auth/desktop/token",
-            "https://vibex.xforever.xin/api/auth/desktop/token",
+            "https://dimo-ai.com/api/auth/desktop/start",
+            "https://dimo-ai.com/api/auth/desktop/decide",
+            "https://dimo-ai.com/api/auth/desktop/token",
+            "https://dimo-ai.com/api/auth/desktop/token",
         ])
     #expect(requests[0].json as? [String: String] == ["deviceName": "iPhone", "hostId": "", "nextPath": "/account"])
     #expect(requests[1].json["requestId"] as? String == "req-1")
@@ -98,7 +100,7 @@ private func client(_ transport: HttpTransport) -> AccountLoginClient {
     let url = client(RecordingTransport([])).oauthStartURL(.github, for: login)
     #expect(
         url?.absoluteString
-            == "https://vibex.xforever.xin/api/auth/oauth/github/start?next=%2Fdesktop%2Fauthorize%3Frequest%3Dreq-1"
+            == "https://dimo-ai.com/api/auth/oauth/github/start?next=%2Fdesktop%2Fauthorize%3Frequest%3Dreq-1"
     )
 }
 

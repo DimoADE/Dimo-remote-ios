@@ -8,6 +8,10 @@ struct ConversationDetailView: View {
     @State private var panel: DetailPanel?
     @State private var created: ConversationListItem?
     @State private var diffChange: FileChangeItem?
+    @State private var showHandoff = false
+    @State private var showSideChat = false
+    @State private var sideChat: SideChatController
+    @Environment(ServerStore.self) private var servers
     @AppStorage("vibex.customRelayModels") private var customRelayModelsJSON: String = "[]"
 
     // Scroll safe-zone & floating bottom indicator state
@@ -42,6 +46,7 @@ struct ConversationDetailView: View {
         onMessageSent: ((String) -> Void)? = nil,
         onTurnFinishedWhileViewing: (() -> Void)? = nil
     ) {
+        _sideChat = State(initialValue: SideChatController(client: client, conversationID: conversation.id))
         _model = State(
             initialValue: ConversationModel(
                 client: client,
@@ -90,6 +95,18 @@ struct ConversationDetailView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
             }
+            if let banner = model.visibleRateLimit {
+                RateLimitRecoveryBanner(
+                    banner: banner,
+                    engine: AgentBrand.displayName(model.conversation.agent_id, hostName: model.currentAgent?.displayName),
+                    writable: connectionWritable,
+                    autoResume: { Task { await model.setRateLimitAutoResume(true) } },
+                    cancelWait: { Task { await model.cancelRateLimitWait() } }
+                )
+            }
+            if model.isThinkingOrRunning {
+                SteeringHint(supported: model.steeringSupported)
+            }
             promptBar.padding(.top, 6)
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -101,6 +118,19 @@ struct ConversationDetailView: View {
             case .changes:
                 DiffListView(client: model.client, workspaceID: model.conversation.workspace_id)
             }
+        }
+        .sheet(isPresented: $showHandoff) {
+            EngineHandoffSheet(
+                client: model.client,
+                conversationID: model.conversation.id,
+                agents: model.agents,
+                currentAgentID: model.conversation.agent_id ?? "",
+                writable: connectionWritable && !model.isThinkingOrRunning,
+                onDone: { Task { await model.reload() } }
+            )
+        }
+        .sheet(isPresented: $showSideChat) {
+            SideChatSheet(controller: sideChat, items: model.items)
         }
         .sheet(item: $diffChange) { change in
             if let hunks = change.hunks {
@@ -162,6 +192,8 @@ struct ConversationDetailView: View {
         }
     }
 
+    private var connectionWritable: Bool { servers.isOnline && servers.isSessionConnected }
+
     private var levelTwoHeaderBar: some View {
         HStack(spacing: 12) {
             FloatingCircleBackButton {
@@ -195,6 +227,18 @@ struct ConversationDetailView: View {
             }
 
             Spacer(minLength: 6)
+
+            Menu {
+                Button("切换引擎…", systemImage: "arrow.left.arrow.right") { showHandoff = true }
+                    .disabled(!connectionWritable || model.isThinkingOrRunning)
+                Button("旁路对话", systemImage: "bubble.left.and.bubble.right") { showSideChat = true }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.primary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
 
             WorkspaceDualToolsCapsule(
                 changeCount: totalChangeCount,
@@ -246,7 +290,7 @@ struct ConversationDetailView: View {
                 unreadMessageUpdates = 0
                 onMessageSent?(sentText)
                 Task {
-                    let ok = await model.send(sentText)
+                    let ok = await model.submit(sentText)
                     if !ok {
                         draft = sentText
                     }
@@ -685,6 +729,8 @@ private struct MessageRow: View {
 
     var body: some View {
         switch item.role {
+        case .divider:
+            HandoffDividerRow(label: item.text)
         case .user:
             let extracted = AttachmentImageStore.shared.extractUserAttachments(from: item.text)
             HStack {

@@ -26,35 +26,40 @@ struct ServerProfile: Codable, Identifiable, Hashable {
     }
 
     var transportChannelLabel: String {
-        isCloudService ? "VibeX 云中继 · Beta" : "LAN 局域网直连"
+        isCloudService ? "Dimo 云中继" : "LAN 局域网直连"
     }
 
     var displayHost: String {
-        if let hostName, !hostName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return hostName
-                .replacingOccurrences(of: ".local", with: "")
+        if let hostName {
+            let cleaned = hostName
+                .replacingOccurrences(of: ".local", with: "", options: .caseInsensitive)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleaned.isEmpty, !AccountDesktop.isGenericName(cleaned) {
+                return cleaned
+            }
         }
         if isCloudService {
-            return "VibeX 桌面端"
+            return "Dimo 桌面端"
         }
         return URL(string: origin)?.host ?? origin
     }
 
     var serverName: String {
-        if let hostName, !hostName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let hostName {
             let cleaned = hostName
-                .replacingOccurrences(of: ".local", with: "")
+                .replacingOccurrences(of: ".local", with: "", options: .caseInsensitive)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if cleaned.lowercased().hasPrefix("vibex") {
-                return cleaned
+            if !cleaned.isEmpty, !AccountDesktop.isGenericName(cleaned) {
+                if cleaned.lowercased().hasPrefix("dimo") {
+                    return cleaned
+                }
+                return "Dimo (\(cleaned))"
             }
-            return "VibeX (\(cleaned))"
         }
         if isCloudService {
-            return "VibeX 桌面端"
+            return "Dimo 桌面端"
         }
-        return "VibeX (\(displayHost))"
+        return "Dimo (\(displayHost))"
     }
 }
 
@@ -144,6 +149,8 @@ final class ServerStore {
     private var discoverTask: Task<Void, Never>?
     private var telemetryLoopTask: Task<Void, Never>?
     private var sasNoticeTask: Task<Void, Never>?
+    private var refreshingTelemetry: Bool = false
+    private var consecutiveTelemetryFailures: Int = 0
     private var declinedCloudFallbackProfileIds = Set<String>()
     weak var accountStore: VibeXAccountStore?
     private(set) var isCloudRelayAuthorized: Bool = false
@@ -154,13 +161,25 @@ final class ServerStore {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let decoded = (defaults.data(forKey: Self.key))
+        var decoded = (defaults.data(forKey: Self.key))
             .flatMap { try? JSONDecoder().decode([ServerProfile].self, from: $0) } ?? []
+        var didMigrate = false
+        for idx in decoded.indices {
+            let migrated = PairingClient.migrateLegacyRelayOrigin(decoded[idx].origin)
+            if migrated != decoded[idx].origin {
+                decoded[idx].origin = migrated
+                didMigrate = true
+            }
+        }
         self.profiles = decoded
-        self.customRelayOrigin = Self.normalizeOrigin(defaults.string(forKey: Self.customRelayKey) ?? "")
+        let savedCustomRelay = defaults.string(forKey: Self.customRelayKey) ?? ""
+        self.customRelayOrigin = Self.normalizeOrigin(PairingClient.migrateLegacyRelayOrigin(savedCustomRelay))
         let savedAutoConnect = defaults.object(forKey: Self.autoConnectKey) as? Bool ?? true
         self.autoConnect = savedAutoConnect
         self.isSessionConnected = savedAutoConnect || decoded.isEmpty
+        if didMigrate {
+            persist()
+        }
         for profile in decoded where profile.origin.contains("/t/") {
             PairingClient.rememberRelayBase(profile.origin)
         }
@@ -174,7 +193,8 @@ final class ServerStore {
                 if let self, self.activeProfile != nil, self.isSessionConnected, !self.isPresentingPairSheet, !self.pairingInProgress {
                     await self.refreshActiveTelemetry()
                 }
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                let sleepNs: UInt64 = (self?.isOnline == true) ? 10_000_000_000 : 4_000_000_000
+                try? await Task.sleep(nanoseconds: sleepNs)
             }
         }
     }
@@ -201,8 +221,10 @@ final class ServerStore {
 
     /// LAN origin of the desktop if it answered the latest Wi-Fi scan.
     func lanOrigin(forHostId hostId: String) -> String? {
-        discoveredHosts.first { host in
-            !host.isCloudService && host.hostId.map(AccountDesktop.rawHostId) == hostId
+        let target = AccountDesktop.rawHostId(hostId).lowercased()
+        guard !target.isEmpty else { return nil }
+        return discoveredHosts.first { host in
+            !host.isCloudService && host.hostId.map { AccountDesktop.rawHostId($0).lowercased() } == target
         }?.origin
     }
 
@@ -268,9 +290,15 @@ final class ServerStore {
         guard let credential = approved.credential else { throw PairingError.connectExpired }
         try KeychainStore.save(credential.access_token, account: credential.device_id)
         let capabilities = try? await HostClient(origin: parsed, accessToken: credential.access_token).checkCapabilities()
-        let resolvedName = (approved.hostName ?? hostName)
-            .replacingOccurrences(of: ".local", with: "")
+        let approvedName = (approved.hostName ?? "")
+            .replacingOccurrences(of: ".local", with: "", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = hostName
+            .replacingOccurrences(of: ".local", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = (!approvedName.isEmpty && !AccountDesktop.isGenericName(approvedName))
+            ? approvedName
+            : fallbackName
         let profile = ServerProfile(
             id: credential.device_id,
             origin: parsed.value,
@@ -382,7 +410,7 @@ final class ServerStore {
                 } else {
                     let lanReachability = invitation.reachability.filter { !ServerProfile.isCloudOrigin($0.origin) }
                     guard !lanReachability.isEmpty else {
-                        throw PairingError.missingInput("云中继连接需要先登录 VibeX 账号，或请确保手机与电脑在同一局域网")
+                        throw PairingError.missingInput("云中继连接需要先登录 Dimo 账号，或请确保手机与电脑在同一局域网")
                     }
                     var lastError: Error = PairingError.unreachable
                     var lanSession: CompanionSession?
@@ -557,13 +585,16 @@ final class ServerStore {
 
     @MainActor
     private func adopt(_ profile: ServerProfile) {
+        var migratedProfile = profile
+        migratedProfile.origin = PairingClient.migrateLegacyRelayOrigin(profile.origin)
         isSessionConnected = true
         isOnline = true
+        consecutiveTelemetryFailures = 0
         connectionFailureReason = nil
         pairingError = nil
         pendingCloudFallback = nil
-        declinedCloudFallbackProfileIds.remove(profile.id)
-        upsertProfile(profile)
+        declinedCloudFallbackProfileIds.remove(migratedProfile.id)
+        upsertProfile(migratedProfile)
         connectionSuccessCount += 1
         Task { @MainActor [weak self] in
             await self?.refreshActiveTelemetry()
@@ -576,9 +607,10 @@ final class ServerStore {
         pendingCloudFallback = nil
         declinedCloudFallbackProfileIds.remove(prompt.profileId)
         if let idx = profiles.firstIndex(where: { $0.id == prompt.profileId }) {
-            profiles[idx].origin = prompt.cloudOrigin
+            profiles[idx].origin = PairingClient.migrateLegacyRelayOrigin(prompt.cloudOrigin)
             persist()
         }
+        consecutiveTelemetryFailures = 0
         isOnline = true
         realtimeRttMs = prompt.rttMs
         connectionFailureReason = nil
@@ -609,6 +641,7 @@ final class ServerStore {
 
     @MainActor
     func handleActiveCredentialRevoked(_ profile: ServerProfile) {
+        consecutiveTelemetryFailures = 0
         guard !isPresentingPairSheet else {
             isOnline = false
             realtimeRttMs = nil
@@ -629,7 +662,7 @@ final class ServerStore {
             return false
         }
         do {
-            try await hostClient.checkCapabilities()
+            _ = try await hostClient.checkCapabilities()
             return true
         } catch let HostError.server(status, _) where status == 401 {
             handleActiveCredentialRevoked(profile)
@@ -642,10 +675,11 @@ final class ServerStore {
     @MainActor
     func handleAccountSignOut() {
         isCloudRelayAuthorized = false
+        consecutiveTelemetryFailures = 0
         if activeProfile?.isCloudService == true {
             isOnline = false
             realtimeRttMs = nil
-            connectionFailureReason = "请登录 VibeX 账号"
+            connectionFailureReason = "请登录 Dimo 账号"
         }
         Task { @MainActor [weak self] in
             await self?.refreshActiveTelemetry()
@@ -654,7 +688,12 @@ final class ServerStore {
 
     @MainActor
     func refreshActiveTelemetry() async {
+        guard !refreshingTelemetry else { return }
+        refreshingTelemetry = true
+        defer { refreshingTelemetry = false }
+
         guard let active = activeProfile else {
+            consecutiveTelemetryFailures = 0
             isOnline = false
             realtimeRttMs = nil
             connectionFailureReason = nil
@@ -663,7 +702,7 @@ final class ServerStore {
 
         let canUseCloud = accountStore?.canUseCloudRelay == true || isCustomRelayOrigin(active.origin)
         if active.isCloudService && !canUseCloud {
-            // Cloud relay requires an active signed-in VibeX account; only allow LAN fallback.
+            // Cloud relay requires an active signed-in Dimo account; only allow LAN fallback.
             if let hostId = active.hostId, !hostId.isEmpty {
                 let candidates = await PairingClient.resolveHostRendezvous(
                     hostId: hostId,
@@ -672,9 +711,10 @@ final class ServerStore {
                 for candidate in candidates where !ServerProfile.isCloudOrigin(candidate) {
                     if let probe = await PairingClient.probeHostHealth(
                         originUrl: candidate,
-                        timeoutSeconds: 1.5,
+                        timeoutSeconds: 1.2,
                         expectedHostId: hostId
                     ) {
+                        guard activeProfile?.id == active.id else { return }
                         if let idx = profiles.firstIndex(where: { $0.id == active.id }) {
                             profiles[idx].origin = probe.host.origin
                             profiles[idx].hostName = active.hostName ?? probe.host.displayName
@@ -683,6 +723,7 @@ final class ServerStore {
                         if let updatedActive = activeProfile {
                             guard await verifyActiveTokenNotRevoked(updatedActive) else { return }
                         }
+                        consecutiveTelemetryFailures = 0
                         isOnline = true
                         realtimeRttMs = probe.rttMs
                         connectionFailureReason = nil
@@ -690,22 +731,27 @@ final class ServerStore {
                     }
                 }
             }
+            guard activeProfile?.id == active.id else { return }
+            consecutiveTelemetryFailures = 0
             isOnline = false
             realtimeRttMs = nil
-            connectionFailureReason = "请登录 VibeX 账号"
+            connectionFailureReason = "请登录 Dimo 账号"
             return
         }
 
+        let primaryTimeout: TimeInterval = active.isCloudService ? 5.0 : 1.2
         if let probe = await PairingClient.probeHostHealth(
             originUrl: active.origin,
-            timeoutSeconds: 1.5,
+            timeoutSeconds: primaryTimeout,
             expectedHostId: active.hostId
         ) {
+            guard activeProfile?.id == active.id else { return }
             guard await verifyActiveTokenNotRevoked(active) else { return }
             if !active.isCloudService {
                 declinedCloudFallbackProfileIds.remove(active.id)
             }
             pendingCloudFallback = nil
+            consecutiveTelemetryFailures = 0
             isOnline = true
             realtimeRttMs = probe.rttMs
             connectionFailureReason = nil
@@ -729,35 +775,41 @@ final class ServerStore {
                 candidates.append(accountOrigin)
             }
             for candidate in candidates where candidate != active.origin {
+                let candidateTimeout: TimeInterval = ServerProfile.isCloudOrigin(candidate) ? 5.0 : 1.2
                 if let probe = await PairingClient.probeHostHealth(
                     originUrl: candidate,
-                    timeoutSeconds: 1.5,
+                    timeoutSeconds: candidateTimeout,
                     expectedHostId: hostId
                 ) {
+                    guard activeProfile?.id == active.id else { return }
                     // Seamlessly switch to Cloud Service when the user's account allows cloud relay;
                     // only prompt if the user is not signed into an account with cloud relay permission.
                     if !active.isCloudService && probe.host.isCloudService && accountStore?.canUseCloudRelay == false {
-                        isOnline = false
-                        realtimeRttMs = nil
-                        connectionFailureReason = "局域网已断开"
-                        if !declinedCloudFallbackProfileIds.contains(active.id) && pendingCloudFallback == nil {
-                            pendingCloudFallback = PendingCloudFallbackPrompt(
-                                profileId: active.id,
-                                hostName: active.displayHost,
-                                cloudOrigin: probe.host.origin,
-                                rttMs: probe.rttMs
-                            )
+                        consecutiveTelemetryFailures += 1
+                        if !isOnline || consecutiveTelemetryFailures >= 2 {
+                            isOnline = false
+                            realtimeRttMs = nil
+                            connectionFailureReason = "局域网已断开"
+                            if !declinedCloudFallbackProfileIds.contains(active.id) && pendingCloudFallback == nil {
+                                pendingCloudFallback = PendingCloudFallbackPrompt(
+                                    profileId: active.id,
+                                    hostName: active.displayHost,
+                                    cloudOrigin: probe.host.origin,
+                                    rttMs: probe.rttMs
+                                )
+                            }
                         }
                         return
                     }
                     if let idx = profiles.firstIndex(where: { $0.id == active.id }) {
-                        profiles[idx].origin = probe.host.origin
+                        profiles[idx].origin = PairingClient.migrateLegacyRelayOrigin(probe.host.origin)
                         profiles[idx].hostName = active.hostName ?? probe.host.displayName
                         persist()
                     }
                     if let updatedActive = activeProfile {
                         guard await verifyActiveTokenNotRevoked(updatedActive) else { return }
                     }
+                    consecutiveTelemetryFailures = 0
                     isOnline = true
                     realtimeRttMs = probe.rttMs
                     connectionFailureReason = nil
@@ -766,9 +818,13 @@ final class ServerStore {
             }
         }
 
-        isOnline = false
-        realtimeRttMs = nil
-        connectionFailureReason = "电脑离线"
+        guard activeProfile?.id == active.id else { return }
+        consecutiveTelemetryFailures += 1
+        if !isOnline || consecutiveTelemetryFailures >= 2 {
+            isOnline = false
+            realtimeRttMs = nil
+            connectionFailureReason = "电脑离线"
+        }
     }
 
     private func upsertProfile(_ profile: ServerProfile) {
@@ -789,6 +845,15 @@ final class ServerStore {
     @MainActor
     func mergeAccountCloudProfiles(_ cloudProfiles: [VibeXSyncableHostProfile], relayBase: String) {
         var didChange = false
+        let migratedRelayBase = PairingClient.migrateLegacyRelayOrigin(relayBase)
+
+        for idx in profiles.indices {
+            let migrated = PairingClient.migrateLegacyRelayOrigin(profiles[idx].origin)
+            if migrated != profiles[idx].origin {
+                profiles[idx].origin = migrated
+                didChange = true
+            }
+        }
 
         for remote in cloudProfiles {
             let cleanHostId = remote.hostId.map(AccountDesktop.rawHostId)
@@ -796,12 +861,13 @@ final class ServerStore {
                   !accessToken.isEmpty
             else { continue }
 
-            var targetOrigin = Self.normalizeOrigin(remote.origin)
+            var targetOrigin = PairingClient.migrateLegacyRelayOrigin(Self.normalizeOrigin(remote.origin))
             if (targetOrigin.isEmpty || targetOrigin.contains("127.0.0.1") || targetOrigin.contains("localhost")),
-               let cleanHostId, !cleanHostId.isEmpty, !relayBase.isEmpty
+               let cleanHostId, !cleanHostId.isEmpty, !migratedRelayBase.isEmpty
             {
-                targetOrigin = "\(relayBase)/t/\(cleanHostId)"
+                targetOrigin = "\(migratedRelayBase)/t/\(cleanHostId)"
             }
+            targetOrigin = PairingClient.migrateLegacyRelayOrigin(targetOrigin)
             guard !targetOrigin.isEmpty else { continue }
 
             let existing = profiles.first {
@@ -844,7 +910,7 @@ final class ServerStore {
                 profileId: profile.id,
                 hostId: profile.hostId,
                 name: profile.displayHost,
-                origin: profile.origin,
+                origin: PairingClient.migrateLegacyRelayOrigin(profile.origin),
                 provisionKind: "http",
                 credential: VibeXSyncableHostCredential(
                     deviceId: profile.id,
@@ -916,6 +982,7 @@ final class ServerStore {
         guard let idx = profiles.firstIndex(where: { $0.id == profileID }) else { return }
         let chosen = profiles.remove(at: idx)
         profiles.append(chosen)
+        consecutiveTelemetryFailures = 0
         persist()
         Task { await refreshActiveTelemetry() }
     }

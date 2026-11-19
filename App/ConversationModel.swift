@@ -36,6 +36,9 @@ final class ConversationModel {
     private(set) var modeOverride: String?
     private var liveControls: SessionState?
     private var controlsRequested = false
+    /// Host-reported steering support of the active binding; nil until `conversation_detail` answers.
+    private(set) var steeringSupported: Bool?
+    private var steeringProbed = false
     private(set) var hasLoaded = false
     private(set) var loadError: String?
     private(set) var busy = false
@@ -48,6 +51,16 @@ final class ConversationModel {
             || transcriptItems.suffix(2).contains(where: { $0.role == .user && $0.text == opt.text })
         return caughtUp ? transcriptItems : (transcriptItems + [opt])
     }
+
+    /// Rate-limit recovery banner: from the live turn failure, else from the last transcript error.
+    var rateLimit: RateLimitBanner? { session.rateLimit ?? transcript.rateLimit }
+    private var rateLimitDismissed: String?
+    var visibleRateLimit: RateLimitBanner? {
+        guard let banner = rateLimit, banner.rowID != rateLimitDismissed, !isThinkingOrRunning else { return nil }
+        return banner
+    }
+
+    var canSteerNow: Bool { isThinkingOrRunning && steeringSupported == true && session.inFlightTurnID != nil }
 
     var isThinkingOrRunning: Bool {
         session.isTurnRunning || Date() < optimisticThinkingUntil
@@ -140,6 +153,10 @@ final class ConversationModel {
             session = built
         }
         applyLiveControls()
+        if session.isTurnRunning, !steeringProbed {
+            steeringProbed = true
+            Task { await refreshSteeringCapability() }
+        }
         if agents.isEmpty {
             Task { await refreshCatalog() }
         }
@@ -157,7 +174,7 @@ final class ConversationModel {
         }
         activity.sync(
             conversationID: conversation.id,
-            projectName: "VibeX",
+            projectName: "Dimo",
             title: conversation.title ?? "未命名对话",
             tasks: currentItems.currentPlan,
             latestToolName: latestToolName,
@@ -311,6 +328,40 @@ final class ConversationModel {
             actionError = describeHostFailure(error)
             return prompt.text
         }
+    }
+
+    private func refreshSteeringCapability() async {
+        do {
+            let detail = try await client.conversationDetailLight(conversationID: conversation.id)
+            steeringSupported = SteeringCapability.from(conversationDetail: detail)
+        } catch {
+            steeringProbed = false
+        }
+    }
+
+    /// Steers the in-flight turn when the Host said the binding can; otherwise queues like a normal send.
+    func submit(_ text: String) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSteerNow, let turnID = session.inFlightTurnID, !trimmed.isEmpty else {
+            return await send(text)
+        }
+        boostPollingUntil = Date().addingTimeInterval(25)
+        let ok = await perform {
+            try await client.steer(conversationID: conversation.id, expectedTurnID: turnID, text: trimmed)
+        }
+        if ok { Task { await reload() } }
+        return ok
+    }
+
+    func setRateLimitAutoResume(_ autoResume: Bool) async {
+        _ = await perform {
+            try await client.rateLimitUpdateAutoResume(conversationID: conversation.id, autoResume: autoResume)
+        }
+    }
+
+    func cancelRateLimitWait() async {
+        if let banner = rateLimit { rateLimitDismissed = banner.rowID }
+        _ = await perform { try await client.rateLimitCancelWait(conversationID: conversation.id) }
     }
 
     func send(_ text: String) async -> Bool {

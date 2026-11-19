@@ -21,7 +21,7 @@ struct ConnectedDeviceBar: View {
     private var deviceTitle: String {
         guard let profile = servers.activeProfile else { return "未配对电脑" }
         if let host = URL(string: profile.origin)?.host, !host.isEmpty {
-            return "VibeX · \(host)"
+            return "Dimo · \(host)"
         }
         return profile.origin
     }

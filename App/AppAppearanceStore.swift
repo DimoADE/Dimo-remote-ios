@@ -273,7 +273,12 @@ final class AppAppearanceStore {
         self.defaults = defaults
         self.userName = defaults.string(forKey: "vibex.profile.userName") ?? "LTF"
         self.userHandle = defaults.string(forKey: "vibex.profile.userHandle") ?? "@ltf"
-        self.userRoleTitle = defaults.string(forKey: "vibex.profile.userRoleTitle") ?? "VibeX Creator"
+        let storedRoleTitle = defaults.string(forKey: "vibex.profile.userRoleTitle")
+        if let storedRoleTitle, storedRoleTitle != "VibeX Creator" {
+            self.userRoleTitle = storedRoleTitle
+        } else {
+            self.userRoleTitle = "Dimo Creator"
+        }
         self.userBio = defaults.string(forKey: "vibex.profile.userBio") ?? "本地优先 AI 协同工作流与多智能体架构"
         self.userAvatarJSON =
             defaults.string(forKey: "vibex.profile.userAvatarJSON")

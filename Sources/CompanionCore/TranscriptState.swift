@@ -4,6 +4,7 @@ import Foundation
 public struct TranscriptState: Sendable {
     public let conversationID: String
     public private(set) var items: [TimelineItem] = []
+    public private(set) var rateLimit: RateLimitBanner?
     var nextIndex = 0
     private var order: [String] = []
     private var rows: [String: (revision: Double, row: JSONValue)] = [:]
@@ -21,6 +22,8 @@ public struct TranscriptState: Sendable {
             if rows[id] == nil { order.append(id) }
             rows[id] = (revision, row)
         }
-        items = TimelineBuilder.build(fromRows: order.compactMap { rows[$0]?.row })
+        let ordered = order.compactMap { rows[$0]?.row }
+        items = TimelineBuilder.build(fromRows: ordered)
+        rateLimit = TimelineExtras.rateLimit(fromRows: ordered)
     }
 }

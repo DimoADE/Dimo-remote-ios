@@ -5,16 +5,16 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>VIBEXRelayURL</key>
-	<string>https://vibex.xforever.xin</string>
+	<string>https://dimo-ai.com</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>扫描电脑上的配对二维码以连接 VibeX 桌面端</string>
+	<string>扫描电脑上的配对二维码以连接 Dimo 桌面端</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>发现在局域网内运行的 VibeX 电脑并建立实时连接</string>
+	<string>发现在局域网内运行的 Dimo 电脑并建立实时连接</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>从相册选择配对二维码图片或向对话附加图片</string>
 	<key>NSMicrophoneUsageDescription</key>

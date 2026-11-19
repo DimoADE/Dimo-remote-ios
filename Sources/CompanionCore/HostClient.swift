@@ -32,6 +32,12 @@ public struct HostClient: Sendable {
         self.transport = transport
     }
 
+    /// Same Host with a longer per-request timeout (blocking commands); other transports are unchanged.
+    public func withRequestTimeout(_ seconds: TimeInterval) -> HostClient {
+        guard let url = transport as? URLSessionTransport else { return self }
+        return HostClient(origin: origin, accessToken: accessToken, transport: url.withTimeout(seconds))
+    }
+
     public func call<T: Decodable>(
         _ command: String,
         args: [String: Any] = [:],
@@ -159,6 +165,42 @@ public struct HostClient: Sendable {
         ])
     }
 
+    /// `conversation_detail` with one tail turn: carries `active_binding.capabilities` (steering).
+    public func conversationDetailLight(conversationID: String) async throws -> JSONValue {
+        try await call(
+            "conversation_detail",
+            args: ["conversationId": conversationID, "tailTurns": 1],
+            as: JSONValue.self
+        )
+    }
+
+    /// Native in-flight steering; only call when the binding reported steering support.
+    public func steer(conversationID: String, expectedTurnID: String, text: String) async throws {
+        try await command("conversation_steer", [
+            "request": [
+                "conversationId": conversationID,
+                "expectedTurnId": expectedTurnID,
+                "text": text,
+            ] as [String: Any],
+        ])
+    }
+
+    public func rateLimitUpdateAutoResume(conversationID: String, autoResume: Bool) async throws {
+        try await command("conversation_rate_limit_update_auto_resume", [
+            "request": [
+                "conversationId": conversationID,
+                "autoResume": autoResume,
+                "continuationPrompt": NSNull(),
+            ] as [String: Any],
+        ])
+    }
+
+    public func rateLimitCancelWait(conversationID: String) async throws {
+        try await command("conversation_rate_limit_cancel_wait", [
+            "request": ["conversationId": conversationID] as [String: Any],
+        ])
+    }
+
     public func cancelTurn(conversationID: String) async throws {
         try await command("conversation_cancel_turn", [
             "request": ["conversationId": conversationID] as [String: Any],
@@ -276,10 +318,27 @@ public struct HostClient: Sendable {
         return try await collaborationCall("space.listMembers", input: ["spaceId": spaceID], as: Page.self).members ?? []
     }
 
-    public func collabMessages(spaceID: String, limit: Int = 200) async throws -> CollabMessagesPage {
-        try await collaborationCall(
+    public func collabMessages(
+        spaceID: String,
+        sinceSeq: Int64? = nil,
+        beforeSeq: Int64? = nil,
+        latest: Bool = true,
+        limit: Int = 80
+    ) async throws -> CollabMessagesPage {
+        var input: [String: Any] = [
+            "spaceId": spaceID,
+            "limit": limit,
+        ]
+        if let beforeSeq {
+            input["beforeSeq"] = beforeSeq
+        } else if let sinceSeq, sinceSeq > 0 {
+            input["sinceSeq"] = sinceSeq
+        } else {
+            input["latest"] = true
+        }
+        return try await collaborationCall(
             "space.listMessages",
-            input: ["spaceId": spaceID, "latest": true, "limit": limit],
+            input: input,
             as: CollabMessagesPage.self
         )
     }

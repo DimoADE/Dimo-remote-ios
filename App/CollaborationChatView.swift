@@ -17,6 +17,16 @@ struct CollaborationChatView: View {
     @State private var loading = true
     @State private var errorMessage: String?
 
+    // Pagination & smart scroll state
+    @State private var hasMoreBefore = false
+    @State private var oldestSeq: Int64?
+    @State private var isLoadingEarlier = false
+    @State private var isNearBottom = true
+    @State private var unreadCount = 0
+    @State private var isInitialScrollPending = true
+    @State private var pendingScrollToBottomAfterSend = false
+    @State private var pollCount = 0
+
     // Composer state
     @State private var draftText = ""
     @State private var selectedMentions: [String] = []
@@ -26,9 +36,14 @@ struct CollaborationChatView: View {
 
     // Sheets & navigation
     @State private var showingDetails = false
+    @State private var showingExpandedComposer = false
+    @State private var fullReaderMessage: CollabSpaceMessage?
     @State private var cardAnswerDraft: [String: String] = [:]
     @State private var headerReactionTrigger: Int = 0
 
+    private static let bottomAnchorID = "__bottom_anchor__"
+    private static let initialPageLimit = 80
+    private static let directPollLimit = 40
     private static let quickEmojis = ["👍", "❤️", "🎉", "🚀", "👀", "💡"]
     private static let delayOptions: [(label: String, seconds: Int)] = [
         ("立即发送", 0),
@@ -46,8 +61,12 @@ struct CollaborationChatView: View {
 
     private var isChatActive: Bool {
         sending
-            || messages.contains(where: \.streaming)
+            || messages.contains(where: \.isStreamingDraft)
             || messages.contains { $0.receipts.contains(where: \.isProcessing) }
+    }
+
+    private var shouldShowExpandComposerButton: Bool {
+        draftText.count > 80 || draftText.contains("\n")
     }
 
     var body: some View {
@@ -104,6 +123,7 @@ struct CollaborationChatView: View {
                         if item.isGroup, item.memberCount > 0 {
                             Text("(\(item.memberCount))")
                                 .font(.system(size: 12))
+                                .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -136,19 +156,53 @@ struct CollaborationChatView: View {
                     }
                 },
                 onChanged: {
-                    await reload()
+                    await pollUpdates(forceMembers: true, forceLatestTail: true)
                     await onChanged()
+                }
+            )
+        }
+        .sheet(item: $fullReaderMessage) { targetMessage in
+            let cardByID = Dictionary(cards.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            CollabFullMessageReaderSheet(
+                message: targetMessage,
+                senderAvatar: resolveSenderAvatar(for: targetMessage),
+                cardRecordsByID: cardByID,
+                onResolveCard: { inlineCard, decision, answer, declined in
+                    if let serverCard = cardByID[inlineCard.id] {
+                        resolveCard(serverCard, decision: decision, answer: answer, declined: declined)
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showingExpandedComposer) {
+            CollabExpandedComposerSheet(
+                title: item.isGroup ? "编辑群消息" : "给 \(item.displayName) 发消息",
+                isGroup: item.isGroup,
+                agentMembers: agentMembers,
+                draftText: $draftText,
+                selectedMentions: $selectedMentions,
+                replyingTo: $replyingTo,
+                canSend: canSend,
+                onToggleMention: { name in
+                    toggleMention(name: name)
+                },
+                onSend: {
+                    sendMessage()
                 }
             )
         }
         .onDisappear {
             dismissKeyboard()
         }
-        .task {
+        .task(id: spaceID) {
+            resetForSpaceChange()
             try? await client.collabMarkRead(threadID: item.threadId)
+            await initialLoad()
             while !Task.isCancelled {
-                await reload()
                 try? await Task.sleep(for: .seconds(2.5))
+                guard !Task.isCancelled else { break }
+                pollCount += 1
+                await pollUpdates(forceMembers: pollCount % 10 == 0, forceLatestTail: false)
             }
         }
     }
@@ -161,7 +215,7 @@ struct CollaborationChatView: View {
             CollaborationChatSkeletonView()
         } else if let errorMessage, messages.isEmpty {
             Spacer()
-            LoadFailureView(message: errorMessage) { Task { await reload() } }
+            LoadFailureView(message: errorMessage) { Task { await initialLoad() } }
             Spacer()
         } else if messages.isEmpty {
             Spacer()
@@ -172,51 +226,146 @@ struct CollaborationChatView: View {
             }
             Spacer()
         } else {
+            let messageByID = Dictionary(
+                messages.map { ($0.id, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
+            let cardByID = Dictionary(
+                cards.map { ($0.id, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
+
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(messages) { message in
-                            CollabMessageRow(
-                                message: message,
-                                allMessages: messages,
-                                isGroup: item.isGroup,
-                                senderAvatar: resolveSenderAvatar(for: message),
-                                quickEmojis: Self.quickEmojis,
-                                onTapSender: {
-                                    openSenderSession(for: message)
-                                },
-                                onReply: {
-                                    withAnimation { replyingTo = message }
-                                },
-                                onReact: { emoji in
-                                    react(to: message, emoji: emoji)
-                                },
-                                onCollect: {
-                                    collectMessage(message)
-                                },
-                                onDistill: {
-                                    distillMessage(message)
-                                },
-                                onCancelReceiptTurn: { receipt in
-                                    cancelTurn(for: receipt)
+                ZStack(alignment: .bottom) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            if hasMoreBefore {
+                                CollabLoadEarlierButton(isLoadingEarlier: isLoadingEarlier) {
+                                    Task {
+                                        await loadEarlierMessages(proxy: proxy)
+                                    }
                                 }
-                            )
-                            .id(message.id)
+                            }
+
+                            ForEach(messages) { message in
+                                CollabMessageRow(
+                                    message: message,
+                                    repliedMessage: resolvedRepliedMessage(for: message, in: messageByID),
+                                    isGroup: item.isGroup,
+                                    senderAvatar: resolveSenderAvatar(for: message),
+                                    quickEmojis: Self.quickEmojis,
+                                    cardRecordsByID: cardByID,
+                                    onTapSender: {
+                                        openSenderSession(for: message)
+                                    },
+                                    onReply: {
+                                        withAnimation { replyingTo = message }
+                                    },
+                                    onReact: { emoji in
+                                        react(to: message, emoji: emoji)
+                                    },
+                                    onCollect: {
+                                        collectMessage(message)
+                                    },
+                                    onDistill: {
+                                        distillMessage(message)
+                                    },
+                                    onOpenFullReader: {
+                                        fullReaderMessage = message
+                                    },
+                                    onResolveInlineCard: { inlineCard, decision, answer, declined in
+                                        if let serverCard = cardByID[inlineCard.id] {
+                                            resolveCard(serverCard, decision: decision, answer: answer, declined: declined)
+                                        }
+                                    },
+                                    onCancelReceiptTurn: { receipt in
+                                        cancelTurn(for: receipt)
+                                    }
+                                )
+                                .id(message.id)
+                            }
+
+                            Color.clear
+                                .frame(height: 1)
+                                .id(Self.bottomAnchorID)
+                                .onAppear {
+                                    isNearBottom = true
+                                    unreadCount = 0
+                                }
+                                .onDisappear {
+                                    isNearBottom = false
+                                }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
+                        .padding(.bottom, 8)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .onAppear {
+                        if isInitialScrollPending, !messages.isEmpty {
+                            scrollToBottom(proxy: proxy, animated: false)
+                            isInitialScrollPending = false
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .onChange(of: messages.last?.id) { _, lastID in
-                    if let lastID {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(lastID, anchor: .bottom)
+                    .onChange(of: messages.last?.id) { oldLastID, newLastID in
+                        guard newLastID != nil else { return }
+                        if isInitialScrollPending {
+                            scrollToBottom(proxy: proxy, animated: false)
+                            isInitialScrollPending = false
+                            pendingScrollToBottomAfterSend = false
+                            unreadCount = 0
+                        } else if isNearBottom || pendingScrollToBottomAfterSend {
+                            scrollToBottom(proxy: proxy, animated: true)
+                            pendingScrollToBottomAfterSend = false
+                            unreadCount = 0
+                        } else {
+                            let finalizedExistingDraft = (oldLastID?.hasPrefix("draft:") == true)
+                                && (messages.last?.isStreamingDraft == false)
+                            if !finalizedExistingDraft || unreadCount == 0 {
+                                unreadCount += 1
+                            }
                         }
+                    }
+                    .onChange(of: messages.last?.envelope.content) { _, _ in
+                        guard isNearBottom, messages.last?.isStreamingDraft == true else { return }
+                        scrollToBottom(proxy: proxy, animated: false)
+                    }
+
+                    if !isNearBottom {
+                        CollabJumpToBottomPill(unreadCount: unreadCount) {
+                            isNearBottom = true
+                            unreadCount = 0
+                            scrollToBottom(proxy: proxy, animated: true)
+                        }
+                        .padding(.bottom, 10)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
             }
         }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+            }
+        } else {
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+            }
+        }
+    }
+
+    private func resolvedRepliedMessage(
+        for message: CollabSpaceMessage,
+        in lookup: [String: CollabSpaceMessage]
+    ) -> CollabSpaceMessage? {
+        guard let replyID = message.inReplyTo, !replyID.isEmpty else { return nil }
+        let clean = replyID.replacingOccurrences(of: "vibex://space-message/", with: "")
+        return lookup[clean]
     }
 
     // MARK: - Scheduled Messages Banner
@@ -234,6 +383,7 @@ struct CollaborationChatView: View {
                             .lineLimit(1)
                         Text("定时投递：\(item.deliverAt)")
                             .font(.system(size: 10))
+                            .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -353,7 +503,7 @@ struct CollaborationChatView: View {
                     Image(systemName: "arrowshape.turn.up.left.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-                    Text("回复 \(reply.envelope.displaySender)：\(reply.envelope.content)")
+                    Text("回复 \(reply.envelope.displaySender)：\(CollabMessageFormatter.previewText(reply.envelope.content))")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -423,11 +573,24 @@ struct CollaborationChatView: View {
                     text: $draftText,
                     axis: .vertical
                 )
-                .lineLimit(1...5)
+                .lineLimit(1...6)
                 .font(.system(size: 15.5))
                 .padding(.leading, item.isGroup ? 4 : 10)
                 .padding(.vertical, 7)
                 .frame(minHeight: 36)
+
+                if shouldShowExpandComposerButton {
+                    Button {
+                        showingExpandedComposer = true
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 32, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("展开全屏编辑")
+                }
 
                 Button {
                     sendMessage()
@@ -463,17 +626,25 @@ struct CollaborationChatView: View {
         }
     }
 
-    private func mentionChip(name: String, label: String, avatar: CollabBotAvatarConfig?) -> some View {
-        let isSelected = selectedMentions.contains(name)
-        return Button {
-            if isSelected {
-                selectedMentions.removeAll { $0 == name }
-            } else {
-                selectedMentions.append(name)
-                if !draftText.contains("@\(name)") {
+    private func toggleMention(name: String) {
+        if selectedMentions.contains(name) {
+            selectedMentions.removeAll { $0 == name }
+        } else {
+            selectedMentions.append(name)
+            if !draftText.contains("@\(name)") {
+                if draftText.hasSuffix("@") {
+                    draftText += "\(name) "
+                } else {
                     draftText = (draftText.isEmpty ? "" : draftText + " ") + "@\(name) "
                 }
             }
+        }
+    }
+
+    private func mentionChip(name: String, label: String, avatar: CollabBotAvatarConfig?) -> some View {
+        let isSelected = selectedMentions.contains(name)
+        return Button {
+            toggleMention(name: name)
         } label: {
             HStack(spacing: 5) {
                 if let avatar {
@@ -514,18 +685,48 @@ struct CollaborationChatView: View {
         !sending && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    // MARK: - Network Operations
+    // MARK: - Network & Incremental Pagination
 
-    private func reload() async {
+    private func resetForSpaceChange() {
+        messages = []
+        scheduled = []
+        cards = []
+        members = []
+        loading = true
+        errorMessage = nil
+        hasMoreBefore = false
+        oldestSeq = nil
+        isLoadingEarlier = false
+        isNearBottom = true
+        unreadCount = 0
+        isInitialScrollPending = true
+        pendingScrollToBottomAfterSend = false
+        pollCount = 0
+    }
+
+    private func initialLoad() async {
         do {
-            async let pageTask = client.collabMessages(spaceID: spaceID)
+            async let pageTask = client.collabMessages(
+                spaceID: spaceID,
+                latest: true,
+                limit: Self.initialPageLimit
+            )
             async let membersTask = item.isGroup ? client.collabSpaceMembers(spaceID: spaceID) : []
             let page = try await pageTask
             let loadedMembers = (try? await membersTask) ?? []
-            messages = page.messages
+            let merged = CollabMessageTimeline.merge(
+                existing: [],
+                incoming: page.messages,
+                replaceStreamingFromIncoming: true
+            )
+            messages = merged
+            hasMoreBefore = page.hasMoreBefore
+            oldestSeq = page.resolvedOldestSeq ?? CollabMessageTimeline.oldestConfirmedSeq(in: merged)
             scheduled = page.scheduled
             cards = page.cards
-            members = loadedMembers
+            if item.isGroup {
+                members = loadedMembers
+            }
             errorMessage = nil
         } catch {
             errorMessage = describeHostFailure(error)
@@ -533,10 +734,120 @@ struct CollaborationChatView: View {
         loading = false
     }
 
+    private func pollUpdates(forceMembers: Bool, forceLatestTail: Bool) async {
+        if messages.isEmpty && !loading {
+            await initialLoad()
+            return
+        }
+        do {
+            let shouldLoadMembers = item.isGroup && (forceMembers || members.isEmpty)
+            async let membersTask: [CollabSpaceMember]? = shouldLoadMembers
+                ? (try? await client.collabSpaceMembers(spaceID: spaceID))
+                : nil
+
+            let page: CollabMessagesPage
+            if item.isDirect || spaceID.hasPrefix("direct:") {
+                page = try await client.collabMessages(
+                    spaceID: spaceID,
+                    latest: true,
+                    limit: Self.directPollLimit
+                )
+            } else if !forceLatestTail, let sinceSeq = CollabMessageTimeline.incrementalSinceSeq(for: messages) {
+                page = try await client.collabMessages(
+                    spaceID: spaceID,
+                    sinceSeq: sinceSeq,
+                    latest: false,
+                    limit: Self.initialPageLimit
+                )
+            } else {
+                page = try await client.collabMessages(
+                    spaceID: spaceID,
+                    latest: true,
+                    limit: Self.directPollLimit
+                )
+            }
+
+            let merged = CollabMessageTimeline.merge(
+                existing: messages,
+                incoming: page.messages,
+                replaceStreamingFromIncoming: true
+            )
+            messages = merged
+            if oldestSeq == nil {
+                oldestSeq = page.resolvedOldestSeq ?? CollabMessageTimeline.oldestConfirmedSeq(in: merged)
+            }
+            scheduled = page.scheduled
+            cards = page.cards
+            if let refreshedMembers = await membersTask {
+                members = refreshedMembers
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = describeHostFailure(error)
+        }
+    }
+
+    private func loadEarlierMessages(proxy: ScrollViewProxy) async {
+        guard !isLoadingEarlier, hasMoreBefore else { return }
+        guard let cursor = oldestSeq ?? CollabMessageTimeline.oldestConfirmedSeq(in: messages),
+              cursor > 1
+        else {
+            hasMoreBefore = false
+            return
+        }
+
+        let anchorID = messages.first?.id
+        isLoadingEarlier = true
+        defer { isLoadingEarlier = false }
+
+        do {
+            let page = try await client.collabMessages(
+                spaceID: spaceID,
+                beforeSeq: cursor,
+                latest: false,
+                limit: Self.initialPageLimit
+            )
+            guard !page.messages.isEmpty else {
+                hasMoreBefore = false
+                return
+            }
+
+            let merged = CollabMessageTimeline.merge(
+                existing: messages,
+                incoming: page.messages,
+                replaceStreamingFromIncoming: false
+            )
+            hasMoreBefore = page.hasMoreBefore
+            if let fetchedOldest = page.resolvedOldestSeq {
+                oldestSeq = min(cursor, fetchedOldest)
+            } else {
+                oldestSeq = CollabMessageTimeline.oldestConfirmedSeq(in: merged)
+            }
+
+            var updateTx = Transaction()
+            updateTx.disablesAnimations = true
+            withTransaction(updateTx) {
+                messages = merged
+            }
+
+            if let anchorID {
+                var scrollTx = Transaction()
+                scrollTx.disablesAnimations = true
+                withTransaction(scrollTx) {
+                    proxy.scrollTo(anchorID, anchor: .top)
+                }
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = describeHostFailure(error)
+        }
+    }
+
     private func sendMessage() {
         let text = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !sending else { return }
         sending = true
+        pendingScrollToBottomAfterSend = true
         let recipients = selectedMentions
         let replyID = replyingTo?.id
         let delay = delaySeconds > 0 ? delaySeconds : nil
@@ -556,9 +867,10 @@ struct CollaborationChatView: View {
                     delaySeconds: delay
                 )
                 errorMessage = nil
-                await reload()
+                await pollUpdates(forceMembers: false, forceLatestTail: false)
                 await onChanged()
             } catch {
+                pendingScrollToBottomAfterSend = false
                 errorMessage = describeHostFailure(error)
             }
             sending = false
@@ -568,7 +880,22 @@ struct CollaborationChatView: View {
     private func react(to message: CollabSpaceMessage, emoji: String) {
         Task {
             try? await client.collabReact(spaceID: spaceID, messageID: message.id, emoji: emoji)
-            await reload()
+            if item.isGroup, message.seq > 1 {
+                if let page = try? await client.collabMessages(
+                    spaceID: spaceID,
+                    sinceSeq: Int64(message.seq - 1),
+                    latest: false,
+                    limit: 5
+                ) {
+                    messages = CollabMessageTimeline.merge(
+                        existing: messages,
+                        incoming: page.messages,
+                        replaceStreamingFromIncoming: false
+                    )
+                    return
+                }
+            }
+            await pollUpdates(forceMembers: false, forceLatestTail: true)
         }
     }
 
@@ -600,7 +927,7 @@ struct CollaborationChatView: View {
         }) else { return }
         Task {
             try? await client.collabCancelSpaceTurn(spaceID: spaceID, memberID: matched.memberId)
-            await reload()
+            await pollUpdates(forceMembers: false, forceLatestTail: true)
         }
     }
 
@@ -610,7 +937,7 @@ struct CollaborationChatView: View {
                 "spaceId": spaceID,
                 "id": scheduledItem.id,
             ])
-            await reload()
+            await pollUpdates(forceMembers: false, forceLatestTail: false)
         }
     }
 
@@ -623,7 +950,7 @@ struct CollaborationChatView: View {
                 declined: declined
             )
             cardAnswerDraft[card.id] = nil
-            await reload()
+            await pollUpdates(forceMembers: false, forceLatestTail: true)
         }
     }
 
@@ -664,25 +991,26 @@ struct CollaborationChatView: View {
     }
 }
 
-// MARK: - Single Message Row
+// MARK: - Single Message Row (O(1) Pre-Resolved Reply Lookup)
 
 private struct CollabMessageRow: View {
     let message: CollabSpaceMessage
-    let allMessages: [CollabSpaceMessage]
+    let repliedMessage: CollabSpaceMessage?
     let isGroup: Bool
     let senderAvatar: CollabBotAvatarConfig
     let quickEmojis: [String]
+    let cardRecordsByID: [String: CollabCard]
     let onTapSender: () -> Void
     let onReply: () -> Void
     let onReact: (String) -> Void
     let onCollect: () -> Void
     let onDistill: () -> Void
+    let onOpenFullReader: () -> Void
+    let onResolveInlineCard: (CollabInlineCard, String?, String?, Bool) -> Void
     let onCancelReceiptTurn: (CollabDeliveryReceipt) -> Void
 
-    private var repliedMessage: CollabSpaceMessage? {
-        guard let replyID = message.inReplyTo, !replyID.isEmpty else { return nil }
-        let clean = replyID.replacingOccurrences(of: "vibex://space-message/", with: "")
-        return allMessages.first { $0.id == clean }
+    private var parsedContent: CollabParsedContent {
+        CollabMessageFormatter.parse(message.envelope.content)
     }
 
     private var senderColor: Color {
@@ -699,7 +1027,7 @@ private struct CollabMessageRow: View {
                         config: senderAvatar,
                         size: 32,
                         animated: true,
-                        sessionActive: message.streaming
+                        sessionActive: message.isStreamingDraft
                     )
                 }
                 .buttonStyle(.plain)
@@ -723,7 +1051,7 @@ private struct CollabMessageRow: View {
                             .background(Capsule().fill(Color.blue.opacity(0.12)))
                     }
 
-                    if message.streaming {
+                    if message.isStreamingDraft {
                         ProgressView()
                             .controlSize(.mini)
                     }
@@ -734,7 +1062,7 @@ private struct CollabMessageRow: View {
                         Rectangle()
                             .fill(Color.secondary.opacity(0.4))
                             .frame(width: 2, height: 14)
-                        Text("\(replied.envelope.displaySender)：\(replied.envelope.content)")
+                        Text("\(replied.envelope.displaySender)：\(CollabMessageFormatter.previewText(replied.envelope.content))")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -747,50 +1075,61 @@ private struct CollabMessageRow: View {
                     )
                 }
 
-                Text(message.envelope.content)
-                    .font(.system(size: 14))
-                    .foregroundStyle(message.isFromUser ? .white : .primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(message.isFromUser ? Color.blue : Color(.secondarySystemGroupedBackground))
-                    )
-                    .textSelection(.enabled)
-                    .contextMenu {
-                        ForEach(quickEmojis, id: \.self) { emoji in
-                            Button("\(emoji) 表情回应") { onReact(emoji) }
-                        }
+                let parsed = parsedContent
+                CollabFormattedBubbleContent(
+                    parsed: parsed,
+                    isFromUser: message.isFromUser,
+                    isStreaming: message.isStreamingDraft,
+                    cardRecordsByID: cardRecordsByID,
+                    onOpenFullReader: onOpenFullReader,
+                    onResolveCard: onResolveInlineCard
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(message.isFromUser ? Color.blue : Color(.secondarySystemGroupedBackground))
+                )
+                .textSelection(.enabled)
+                .contextMenu {
+                    ForEach(quickEmojis, id: \.self) { emoji in
+                        Button("\(emoji) 表情回应") { onReact(emoji) }
+                    }
+                    Divider()
+                    Button {
+                        onReply()
+                    } label: {
+                        Label("回复", systemImage: "arrowshape.turn.up.left")
+                    }
+                    Button {
+                        UIPasteboard.general.string = message.envelope.content
+                    } label: {
+                        Label("复制内容", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        onOpenFullReader()
+                    } label: {
+                        Label("全屏阅读", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+                    Button {
+                        onCollect()
+                    } label: {
+                        Label("加入空间收藏", systemImage: "bookmark")
+                    }
+                    Button {
+                        onDistill()
+                    } label: {
+                        Label("提炼到空间记忆", systemImage: "brain")
+                    }
+                    if !message.isFromUser && !message.envelope.isSystem {
                         Divider()
                         Button {
-                            onReply()
+                            onTapSender()
                         } label: {
-                            Label("回复", systemImage: "arrowshape.turn.up.left")
-                        }
-                        Button {
-                            UIPasteboard.general.string = message.envelope.content
-                        } label: {
-                            Label("复制内容", systemImage: "doc.on.doc")
-                        }
-                        Button {
-                            onCollect()
-                        } label: {
-                            Label("加入空间收藏", systemImage: "bookmark")
-                        }
-                        Button {
-                            onDistill()
-                        } label: {
-                            Label("提炼到空间记忆", systemImage: "brain")
-                        }
-                        if !message.isFromUser && !message.envelope.isSystem {
-                            Divider()
-                            Button {
-                                onTapSender()
-                            } label: {
-                                Label("打开该助手会话", systemImage: "terminal")
-                            }
+                            Label("打开该助手会话", systemImage: "terminal")
                         }
                     }
+                }
 
                 // Reactions bar
                 let reactions = message.groupedReactions
@@ -805,6 +1144,7 @@ private struct CollabMessageRow: View {
                                         .font(.system(size: 12))
                                     Text("\(r.count)")
                                         .font(.system(size: 11, weight: .medium))
+                                        .monospacedDigit()
                                         .foregroundStyle(r.byUser ? .blue : .secondary)
                                 }
                                 .padding(.horizontal, 7)

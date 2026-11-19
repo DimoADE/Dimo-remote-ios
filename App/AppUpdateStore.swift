@@ -51,13 +51,13 @@ final class AppUpdateStore {
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0.4.7"
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0.5.0"
     }
 
     var currentBuild: Int {
         let raw = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "6"
-        return Int(raw) ?? 6
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "9"
+        return Int(raw) ?? 9
     }
 
     func checkIfDue() {
@@ -195,7 +195,7 @@ final class AppUpdateStore {
         defaults.set(release.releaseKey, forKey: Self.notifiedReleaseKey)
 
         let content = UNMutableNotificationContent()
-        content.title = "发现 VibeX 新版本 v\(release.version)"
+        content.title = "发现 Dimo 新版本 v\(release.version)"
         let lines = release.changelog
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
