@@ -5,7 +5,7 @@ import Observation
 /// Reader-facing text for a failed Host call: unreachable and revoked need different actions.
 func describeHostFailure(_ error: Error) -> String {
     if error is URLError {
-        return "无法连接电脑。请确认电脑上的 VibeX 正在运行并已开启远程连接"
+        return "无法连接电脑。请确认电脑上的 Dimo 正在运行并已开启远程连接"
     }
     if case HostError.server(let status, _) = error {
         if status == 401 {

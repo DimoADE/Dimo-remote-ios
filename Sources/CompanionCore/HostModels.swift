@@ -165,7 +165,7 @@ public enum TimelineSegment: Identifiable, Equatable, Sendable {
 }
 
 public struct TimelineItem: Identifiable, Equatable, Sendable {
-    public enum Role: Sendable { case user, assistant }
+    public enum Role: Sendable { case user, assistant, divider }
 
     public let id: String
     public let role: Role
@@ -230,6 +230,16 @@ public enum TimelineBuilder {
                     list.append(FileChangeItem(path: path, additions: count("additions"), deletions: count("deletions")))
                     changes[owner] = list
                 }
+                continue
+            }
+            if row["row"]?["kind"]?.stringValue == "session_notice",
+               let rowID = row["row_id"]?.stringValue,
+               let label = TimelineExtras.handoffLabel(fromNotice: row["row"]?["notice"]) {
+                var revision = 0.0
+                if case .number(let value)? = row["revision"] { revision = value }
+                if let known = latest[rowID], known.revision > revision { continue }
+                if latest[rowID] == nil { order.append(rowID) }
+                latest[rowID] = (revision, TimelineItem(id: "handoff:\(rowID)", role: .divider, text: label))
                 continue
             }
             guard let rowID = row["row_id"]?.stringValue,

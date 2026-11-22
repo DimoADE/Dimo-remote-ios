@@ -1,6 +1,6 @@
 import Foundation
 
-/// Text shown by the Host as QR and copyable connection code: `vibex-pairing:` + JSON.
+/// Text shown by the Host as QR and copyable connection code: `dimo-pairing:` (or legacy `vibex-pairing:`) + JSON.
 public struct PairingInvitation: Decodable, Equatable, Sendable {
     public struct Reachability: Decodable, Equatable, Sendable {
         public let origin: String
@@ -11,7 +11,9 @@ public struct PairingInvitation: Decodable, Equatable, Sendable {
         }
     }
 
-    public static let prefix = "vibex-pairing:"
+    public static let prefix = "dimo-pairing:"
+    public static let legacyPrefix = "vibex-pairing:"
+    static let acceptedPrefixes = [prefix, legacyPrefix]
     public static let companionPreset = "companion"
 
     public let version: Int
@@ -23,13 +25,15 @@ public struct PairingInvitation: Decodable, Equatable, Sendable {
     public let reachability: [Reachability]
 
     public static func looksLikeInvitation(_ text: String) -> Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(prefix)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return acceptedPrefixes.contains { trimmed.hasPrefix($0) }
     }
 
     public static func parse(_ text: String) throws -> PairingInvitation {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(prefix) else { throw PairingError.invalidInvitation }
-        let json = Data(trimmed.dropFirst(prefix.count).utf8)
+        guard let used = acceptedPrefixes.first(where: { trimmed.hasPrefix($0) })
+        else { throw PairingError.invalidInvitation }
+        let json = Data(trimmed.dropFirst(used.count).utf8)
         guard let invitation = try? JSONDecoder().decode(PairingInvitation.self, from: json),
               !invitation.pairing_token.isEmpty
         else { throw PairingError.invalidInvitation }

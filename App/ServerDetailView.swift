@@ -30,7 +30,7 @@ struct ServerDetailView: View {
                 }
                 LabeledContent("传输通道") {
                     HStack(spacing: 6) {
-                        Text(isCloudService ? "VibeX 云服务" : "LAN 局域网直连")
+                        Text(isCloudService ? "Dimo 云服务" : "LAN 局域网直连")
                             .foregroundStyle(isCloudService ? Color.accentColor : .secondary)
                         if isCloudService {
                             Text("Beta")

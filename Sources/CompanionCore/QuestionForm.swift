@@ -35,7 +35,7 @@ public struct FormQuestion: Equatable, Sendable, Identifiable {
     public enum ValueType: Sendable { case string, number, integer, boolean }
 
     public let id: String
-    /// Schema property the answer is stored under; nil for `x-vibex-questions`, which answer by id.
+    /// Schema property the answer is stored under; nil for `x-dimo-questions`, which answer by id.
     public let fieldName: String?
     public let customFieldName: String?
     public let header: String
@@ -73,7 +73,7 @@ public struct QuestionAnswer: Equatable, Sendable {
 public enum QuestionForm {
     public static func questions(for request: PendingQuestion) -> [FormQuestion] {
         let root = request.schema
-        if let list = root?["x-vibex-questions"]?.arrayValue {
+        if let list = root?["x-dimo-questions"]?.arrayValue {
             let parsed = list.enumerated().compactMap { index, item -> FormQuestion? in
                 guard item["question"]?.stringValue != nil || item["header"]?.stringValue != nil else { return nil }
                 let text = item["question"]?.stringValue ?? "问题 \(index + 1)"
@@ -145,7 +145,7 @@ public enum QuestionForm {
         answers: [String: QuestionAnswer]
     ) -> JSONValue? {
         guard answers.values.contains(where: { !$0.isEmpty }) else { return nil }
-        if request.schema?["x-vibex-questions"]?.arrayValue != nil {
+        if request.schema?["x-dimo-questions"]?.arrayValue != nil {
             let items = questions.map { question -> JSONValue in
                 let answer = answers[question.id] ?? QuestionAnswer()
                 var labels = answer.selected.compactMap { value in

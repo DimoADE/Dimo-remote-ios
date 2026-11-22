@@ -420,9 +420,9 @@ private final class RecordingTransport: HttpTransport, @unchecked Sendable {
     #expect(content?["tags"] == .array([.string("x"), .string("y")]))
     #expect(content?["note_custom"] == .string("补充"))
 
-    // x-vibex-questions answer by id with labels
+    // x-dimo-questions answer by id with labels
     let vibex = try decode("""
-    {"x-vibex-questions":[{"id":"n","header":"数量","question":"几个？","options":[{"label":"三个"},{"label":"五个"}],"multiSelect":false}]}
+    {"x-dimo-questions":[{"id":"n","header":"数量","question":"几个？","options":[{"label":"三个"},{"label":"五个"}],"multiSelect":false}]}
     """)
     let request = PendingQuestion(id: "q3", prompt: "", options: [], schema: vibex)
     let steps = QuestionForm.questions(for: request)

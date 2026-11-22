@@ -6,18 +6,18 @@ import Foundation
 public final class E2eeSessionManager: @unchecked Sendable {
     public static let shared = E2eeSessionManager()
 
-    public static let headerE2ee = "x-vibex-e2ee"
-    public static let headerClientPub = "x-vibex-e2ee-client-pub"
-    public static let headerServerPub = "x-vibex-e2ee-server-pub"
-    public static let headerSession = "x-vibex-e2ee-session"
-    public static let headerAuth = "x-vibex-e2ee-auth"
+    public static let headerE2ee = "x-dimo-e2ee"
+    public static let headerClientPub = "x-dimo-e2ee-client-pub"
+    public static let headerServerPub = "x-dimo-e2ee-server-pub"
+    public static let headerSession = "x-dimo-e2ee-session"
+    public static let headerAuth = "x-dimo-e2ee-auth"
     public static let version = "v1"
 
-    private static let hkdfSalt = Data("vibex-e2ee-v1-salt".utf8)
-    private static let hkdfInfo = Data("vibex-e2ee-v1-aes256gcm".utf8)
-    private static let aadAuth = Data("vibex-e2ee-auth-v1".utf8)
-    private static let aadReq = Data("vibex-e2ee-req-v1".utf8)
-    private static let aadResp = Data("vibex-e2ee-resp-v1".utf8)
+    private static let hkdfSalt = Data("dimo-e2ee-v1-salt".utf8)
+    private static let hkdfInfo = Data("dimo-e2ee-v1-aes256gcm".utf8)
+    private static let aadAuth = Data("dimo-e2ee-auth-v1".utf8)
+    private static let aadReq = Data("dimo-e2ee-req-v1".utf8)
+    private static let aadResp = Data("dimo-e2ee-resp-v1".utf8)
 
     public struct SessionState: Sendable {
         public let sessionId: String
@@ -58,6 +58,13 @@ public final class E2eeSessionManager: @unchecked Sendable {
 
     public func isE2eeActive(for urlOrOrigin: String) -> Bool {
         session(for: urlOrOrigin) != nil
+    }
+
+    public func clearSession(for urlOrOrigin: String) {
+        let key = Self.originKey(from: urlOrOrigin)
+        lock.lock()
+        sessionsByOrigin.removeValue(forKey: key)
+        lock.unlock()
     }
 
     @discardableResult

@@ -35,12 +35,12 @@ struct VibeXAccountUser: Codable, Equatable, Sendable {
         if let mail = email?.split(separator: "@").first?.trimmingCharacters(in: .whitespacesAndNewlines), !mail.isEmpty {
             return mail
         }
-        return "VibeX User"
+        return "Dimo User"
     }
 
     var avatarInitial: String {
         let name = resolvedDisplayName
-        return name.first.map { String($0).uppercased() } ?? "V"
+        return name.first.map { String($0).uppercased() } ?? "D"
     }
 
     var accountIdentifier: String {
@@ -149,7 +149,7 @@ struct VibeXSyncableHostProfile: Codable, Identifiable, Equatable, Sendable {
 @Observable
 @MainActor
 final class VibeXAccountStore {
-    static let siteBaseURL = "https://vibex.xforever.xin"
+    static let siteBaseURL = "https://dimo-ai.com"
     static let termsPath = "/docs/service"
     /// The site has no privacy page yet; this is where it will be published.
     static let privacyPolicyPath = "/docs/privacy"
@@ -157,7 +157,14 @@ final class VibeXAccountStore {
     private static let cachedOverviewKey = "vibex.account.cached_overview"
     private static let requiresLoginKey = "vibex.account.requires_login"
 
+    private struct PushedHostCredentialKey: Hashable {
+        let rawHostId: String
+        let profileId: String
+        let token: String
+    }
+
     private let defaults: UserDefaults
+    private var lastPushedHostCredentials: Set<PushedHostCredentialKey>?
     private(set) var token: String?
     private(set) var overview: VibeXAccountOverview?
     private(set) var desktops: [AccountDesktop] = []
@@ -193,10 +200,10 @@ final class VibeXAccountStore {
     var relayBase: String {
         let relay = overview?.assignedRelayServer
         if let origin = relay?.publicOrigin?.trimmingCharacters(in: .whitespacesAndNewlines), !origin.isEmpty {
-            return origin
+            return PairingClient.migrateLegacyRelayOrigin(origin)
         }
         if let host = relay?.relayHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
-            return "https://\(host)"
+            return PairingClient.migrateLegacyRelayOrigin("https://\(host)")
         }
         return PairingClient.defaultOfficialRelayBase
     }
@@ -237,6 +244,7 @@ final class VibeXAccountStore {
             try? KeychainStore.save(valid, account: Self.tokenAccountKey)
             defaults.set(valid, forKey: Self.tokenAccountKey)
         } else {
+            lastPushedHostCredentials = nil
             KeychainStore.delete(account: Self.tokenAccountKey)
             defaults.removeObject(forKey: Self.tokenAccountKey)
             defaults.removeObject(forKey: Self.cachedOverviewKey)
@@ -259,7 +267,7 @@ final class VibeXAccountStore {
 
     private static var deviceName: String {
         let name = UIDevice.current.name
-        return name.isEmpty ? "VibeX iOS" : name
+        return name.isEmpty ? "Dimo iOS" : name
     }
 
     func sendLoginCode(to target: String) async throws {
@@ -380,19 +388,68 @@ final class VibeXAccountStore {
 
     private func fetchAccountHostsOnly() async {
         guard isSignedIn else { return }
-        await loadDesktops()
         if let saved = try? await fetchSavedHosts() {
             self.cloudSavedHosts = saved
         }
+        await loadDesktops()
     }
 
     private func loadDesktops() async {
- do {
-     desktops = try await fetchDesktops()
-     desktopsSyncFailed = false
+        do {
+            desktops = try await fetchDesktops()
+            desktopsSyncFailed = false
         } catch {
-     desktopsSyncFailed = true
- }
+            desktopsSyncFailed = true
+        }
+    }
+
+    private func currentOnlineLanHostIds() -> Set<String> {
+        guard let servers = attachedServerStore else { return [] }
+        var ids = Set(
+            servers.discoveredHosts
+                .filter { !$0.isCloudService }
+                .compactMap { $0.hostId.map { AccountDesktop.rawHostId($0).lowercased() } }
+                .filter { !$0.isEmpty }
+        )
+        if servers.isOnline,
+           let active = servers.activeProfile,
+           !active.isCloudService,
+           let activeId = active.hostId.map({ AccountDesktop.rawHostId($0).lowercased() }),
+           !activeId.isEmpty
+        {
+            ids.insert(activeId)
+        }
+        return ids
+    }
+
+    private func currentPairedHostIds() -> Set<String> {
+        var ids = Set(
+            cloudSavedHosts
+                .compactMap { $0.hostId.map { AccountDesktop.rawHostId($0).lowercased() } }
+                .filter { !$0.isEmpty }
+        )
+        if let servers = attachedServerStore {
+            for profile in servers.profiles {
+                if let hid = profile.hostId.map({ AccountDesktop.rawHostId($0).lowercased() }), !hid.isEmpty {
+                    ids.insert(hid)
+                }
+            }
+        }
+        return ids
+    }
+
+    private static func credentialSignature(for profiles: [VibeXSyncableHostProfile]) -> Set<PushedHostCredentialKey> {
+        Set(profiles.compactMap { profile in
+            guard let token = profile.credential?.accessToken.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !token.isEmpty
+            else { return nil }
+            let rawHostId = profile.hostId.map(AccountDesktop.rawHostId) ?? ""
+            return PushedHostCredentialKey(
+                rawHostId: rawHostId,
+                profileId: profile.profileId,
+                token: token
+            )
+        })
     }
 
     func syncHosts(with servers: ServerStore, forcePush: Bool = false) async {
@@ -400,17 +457,27 @@ final class VibeXAccountStore {
         isSyncingHosts = true
         defer { isSyncingHosts = false }
 
-        await loadDesktops()
-
         if let remoteSaved = try? await fetchSavedHosts() {
             self.cloudSavedHosts = remoteSaved
             servers.mergeAccountCloudProfiles(remoteSaved, relayBase: relayBase)
         }
 
+        await loadDesktops()
+
         let localExport = servers.exportSyncableProfiles()
-        if !localExport.isEmpty && (forcePush || localExport.count != cloudSavedHosts.count) {
-            if let updated = try? await putSavedHosts(localExport) {
-                self.cloudSavedHosts = updated
+        if !localExport.isEmpty {
+            let localSig = Self.credentialSignature(for: localExport)
+            let remoteSig = Self.credentialSignature(for: cloudSavedHosts)
+            let hasLegacyCloudOrigin = cloudSavedHosts.contains {
+                PairingClient.migrateLegacyRelayOrigin($0.origin) != $0.origin
+            }
+            if localSig == remoteSig && !hasLegacyCloudOrigin {
+                self.lastPushedHostCredentials = localSig
+            } else if forcePush || localSig != remoteSig || hasLegacyCloudOrigin {
+                if let updated = try? await putSavedHosts(localExport) {
+                    self.lastPushedHostCredentials = localSig
+                    self.cloudSavedHosts = updated
+                }
             }
         }
         lastSyncedAt = Date()
@@ -420,7 +487,12 @@ final class VibeXAccountStore {
         guard isSignedIn else { return }
         let localExport = servers.exportSyncableProfiles()
         guard !localExport.isEmpty else { return }
+        let signature = Self.credentialSignature(for: localExport)
+        if signature == lastPushedHostCredentials {
+            return
+        }
         if let updated = try? await putSavedHosts(localExport) {
+            self.lastPushedHostCredentials = signature
             self.cloudSavedHosts = updated
             self.lastSyncedAt = Date()
         }
@@ -428,6 +500,7 @@ final class VibeXAccountStore {
 
     func deleteCloudSavedHost(profileId: String, hostId: String?, origin: String) async {
         guard isSignedIn else { return }
+        lastPushedHostCredentials = nil
         var payload: [String: String] = [
             "profileId": profileId,
             "origin": origin
@@ -445,6 +518,23 @@ final class VibeXAccountStore {
             authenticated: true
         ), let remaining = resp.savedHosts {
             self.cloudSavedHosts = remaining
+            self.lastPushedHostCredentials = Self.credentialSignature(for: remaining)
+        }
+    }
+
+    func deleteDesktopHostConfig(hostId: String) async {
+        let bareId = AccountDesktop.rawHostId(hostId)
+        guard !bareId.isEmpty else { return }
+        desktops.removeAll { AccountDesktop.rawHostId($0.hostId).caseInsensitiveCompare(bareId) == .orderedSame }
+        guard isSignedIn else { return }
+        let payload = ["hostId": "host:\(bareId)"]
+        if let bodyData = try? JSONEncoder().encode(payload) {
+            _ = try? await performRawRequest(
+                path: "/api/account/desktop/host-configs",
+                method: "DELETE",
+                bodyData: bodyData,
+                tokenOverride: token
+            )
         }
     }
 
@@ -455,7 +545,52 @@ final class VibeXAccountStore {
             bodyData: nil,
             tokenOverride: token
         )
-        return AccountDesktop.parseDirectory(data)
+        let parsed = AccountDesktop.parseDirectory(data)
+        guard !parsed.isEmpty else { return [] }
+
+        let currentRelayBase = relayBase
+        var probedById: [String: Bool] = [:]
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for desktop in parsed {
+                let hostId = desktop.hostId
+                let origin = desktop.cloudOrigin(relayBase: currentRelayBase)
+                group.addTask {
+                    let online = await Self.probeCloudOnline(origin: origin, timeout: 1.5)
+                    return (hostId, online)
+                }
+            }
+            for await (hostId, online) in group {
+                probedById[hostId] = online
+            }
+        }
+
+        let probed = parsed.map { desktop -> AccountDesktop in
+            var copy = desktop
+            copy.cloudOnline = probedById[desktop.hostId] ?? false
+            return copy
+        }
+
+        return AccountDesktop.deduplicate(
+            probed,
+            onlineLanHostIds: currentOnlineLanHostIds(),
+            pairedHostIds: currentPairedHostIds()
+        )
+    }
+
+    private static func probeCloudOnline(origin: String, timeout: TimeInterval) async -> Bool {
+        var base = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: "\(base)/health") else { return false }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200..<300).contains(http.statusCode)
+        } catch {
+            return false
+        }
     }
 
     private func fetchSavedHosts() async throws -> [VibeXSyncableHostProfile] {
@@ -496,7 +631,7 @@ final class VibeXAccountStore {
     private func describeAccountError(_ error: Error) -> String {
         if let httpErr = error as? AccountHTTPError {
             switch httpErr.code {
-            case "network": return "无法连接到 VibeX 账号服务，请检查网络后重试"
+            case "network": return "无法连接到 Dimo 账号服务，请检查网络后重试"
             case "signed_out": return "登录状态已失效，请重新登录"
             default: return "账号服务请求失败（\(httpErr.code)）"
             }
@@ -603,6 +738,29 @@ struct VibeXAccountSettingsView: View {
         account.overview?.balanceMicro ?? 0
     }
 
+    /// 在线/离线、局域网或云中继，以及最近同步时间。
+    private var syncStatusLine: String {
+        let route: String
+        if !servers.isOnline {
+            route = "离线"
+        } else {
+            let host = URL(string: servers.activeProfile?.origin ?? "")?.host?.lowercased() ?? ""
+            route = Self.isLanHost(host) ? "在线 · 局域网" : "在线 · 云中继"
+        }
+        let last = account.lastSyncedAt.map {
+            "最近同步 " + $0.formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
+        } ?? "尚未同步"
+        return route + " · " + last
+    }
+
+    static func isLanHost(_ host: String) -> Bool {
+        if host == "localhost" || host.hasSuffix(".local") { return true }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        return parts[0] == 10 || parts[0] == 127 || (parts[0] == 192 && parts[1] == 168)
+            || (parts[0] == 172 && (16...31).contains(parts[1]))
+    }
+
     private var activeTotalMicro: Int64 {
         activeGrants.reduce(0) { $0 + $1.amountMicro }
     }
@@ -625,12 +783,22 @@ struct VibeXAccountSettingsView: View {
 
     private var planDisplayName: String {
         switch account.user?.tier ?? .regular {
-        case .subscriber: return "VibeX 订阅会员"
-        case .sponsor: return "VibeX 赞助会员"
-        case .beta: return "VibeX Beta 计划"
-        case .admin: return "VibeX 管理员"
+        case .subscriber: return "Dimo 订阅会员"
+        case .sponsor: return "Dimo 赞助会员"
+        case .beta: return "Dimo Beta 计划"
+        case .admin: return "Dimo 管理员"
         case .regular:
-            return hasActiveCreditsOrTier ? "按量付费 · 已激活" : "VibeX 免费版"
+            return hasActiveCreditsOrTier ? "按量付费 · 已激活" : "Dimo 免费版"
+        }
+    }
+
+    private var planBadgeText: String {
+        switch account.user?.tier ?? .regular {
+        case .subscriber: return "订阅会员"
+        case .sponsor: return "赞助会员"
+        case .beta: return "Beta"
+        case .admin: return "管理员"
+        case .regular: return hasActiveCreditsOrTier ? "按量付费" : "Dimo 免费版"
         }
     }
 
@@ -692,6 +860,10 @@ struct VibeXAccountSettingsView: View {
                                 )
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                Text(syncStatusLine)
+                                    .font(.caption2)
+                                    .foregroundStyle(servers.isOnline ? Color.green : Color.secondary)
                             }
                         }
                         .padding(.vertical, 2)
@@ -820,7 +992,7 @@ struct VibeXAccountSettingsView: View {
                                 ProgressView()
                                     .controlSize(.small)
                             }
-                            Text("退出 VibeX 账号")
+                            Text("退出 Dimo 账号")
                                 .fontWeight(.semibold)
                             Spacer()
                         }
@@ -829,7 +1001,7 @@ struct VibeXAccountSettingsView: View {
                 }
             }
         }
-        .navigationTitle("VibeX 账号")
+        .navigationTitle("Dimo 账号")
         .navigationDestination(isPresented: $showsLogin) {
             LoginView(allowsCodePairing: false)
         }
@@ -873,10 +1045,11 @@ struct VibeXAccountSettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
+                    Text(user.resolvedDisplayName)
+                        .font(.headline.weight(.bold))
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 6) {
-                        Text(user.resolvedDisplayName)
-                            .font(.headline.weight(.bold))
-                        Text(hasActiveCreditsOrTier ? "已激活" : "免费版")
+                        Text(planBadgeText)
                             .font(.caption2.weight(.semibold))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
@@ -935,7 +1108,7 @@ struct VibeXAccountSettingsView: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("登录 VibeX 账号")
+                    Text("登录 Dimo 账号")
                         .font(.subheadline.weight(.bold))
                     Text("跨设备自动同步已配对电脑、查看订阅计划与模型路由额度")
                         .font(.caption)
@@ -956,7 +1129,7 @@ struct VibeXAccountSettingsView: View {
 
     private func subscriptionAndCreditsCard(overview: VibeXAccountOverview) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Image(systemName: "sparkles")
@@ -972,17 +1145,19 @@ struct VibeXAccountSettingsView: View {
                         Text("支持 Claude / OpenAI / Gemini 等多模型路由与云中继")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer()
                 Button {
                     VibeXAccountStore.openSitePath("/account/plan")
                 } label: {
-                    Text("充值 / 订阅")
-                        .font(.caption.weight(.semibold))
+                    Text(balanceMicro > 0 ? "充值 / 订阅" : "去充值")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 36)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.mini)
+                .controlSize(.regular)
             }
 
             Divider()
@@ -1012,19 +1187,33 @@ struct VibeXAccountSettingsView: View {
             if activeTotalMicro > 0 {
                 ProgressView(value: remainingPercent)
                     .tint(Color.accentColor)
+            } else if balanceMicro == 0 {
+                Label("余额为 0，充值后即可使用多模型路由与云中继", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.vertical, 4)
     }
 
-    private func usage30dCard(overview: VibeXAccountOverview) -> some View {
+    private func usage30dCard(overview: VibeXAccountOverview) -> AnyView {
         let rows = overview.usage30d?.byModel ?? []
         let spent30d = rows.reduce(Int64(0)) { $0 + $1.costMicro }
         let reqs30d = rows.reduce(0) { $0 + $1.requests }
         let tokens30d = rows.reduce(Int64(0)) { $0 + $1.tokens }
         let nameMap = overview.usage30d?.modelNames ?? [:]
 
-        return VStack(alignment: .leading, spacing: 12) {
+        if rows.isEmpty {
+            return AnyView(
+                Label("近 30 天暂无模型路由调用记录", systemImage: "chart.bar")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            )
+        }
+
+        return AnyView(VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 metricBox(title: "30天消耗", value: "$\(Self.formatCredits(spent30d))")
                 metricBox(title: "请求次数", value: "\(reqs30d)")
@@ -1032,8 +1221,27 @@ struct VibeXAccountSettingsView: View {
             }
 
             if !rows.isEmpty {
+                let top = Array(rows.sorted { $0.costMicro > $1.costMicro }.prefix(6))
+                let maxCost = Double(max(top.first?.costMicro ?? 1, 1))
+                Text("近 30 天各模型消耗占比")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(alignment: .bottom, spacing: 8) {
+                    ForEach(top) { row in
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor)
+                            .frame(height: max(4, 64 * CGFloat(Double(row.costMicro) / maxCost)))
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: 64, alignment: .bottom)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    top.map { "\(nameMap[$0.modelId] ?? $0.modelId) $\(Self.formatCredits($0.costMicro))" }
+                        .joined(separator: "；")
+                )
                 Divider()
-                ForEach(rows.prefix(6)) { row in
+                ForEach(top) { row in
                     HStack {
                         Text(nameMap[row.modelId] ?? row.modelId)
                             .font(.caption.weight(.medium))
@@ -1047,13 +1255,9 @@ struct VibeXAccountSettingsView: View {
                             .frame(minWidth: 54, alignment: .trailing)
                     }
                 }
-            } else {
-                Text("近 30 天暂无模型路由调用记录")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 4))
     }
 
     private func metricBox(title: String, value: String) -> some View {

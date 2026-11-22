@@ -229,7 +229,7 @@ final class CompanionAttentionCenter: NSObject, UNUserNotificationCenterDelegate
                !group.name.isEmpty {
                 return group.name
             }
-            return "VibeX"
+            return "Dimo"
         }
 
         for conv in conversations {

@@ -96,10 +96,11 @@ private func invitationText(
     preset: String = "companion",
     expiresAt: String = "2999-01-01T00:00:00Z",
     hostId: String = "h",
+    prefix: String = "dimo-pairing:",
     origins: [String]
 ) -> String {
     let reach = origins.map { "{\"origin\":\"\($0)\",\"kind\":\"lan\"}" }.joined(separator: ",")
-    return "vibex-pairing:{\"version\":1,\"host_id\":\"\(hostId)\",\"preset\":\"\(preset)\",\"expires_at\":\"\(expiresAt)\",\"pairing_id\":\"p\",\"pairing_token\":\"secret\",\"reachability\":[\(reach)]}"
+    return "\(prefix){\"version\":1,\"host_id\":\"\(hostId)\",\"preset\":\"\(preset)\",\"expires_at\":\"\(expiresAt)\",\"pairing_id\":\"p\",\"pairing_token\":\"secret\",\"reachability\":[\(reach)]}"
 }
 
 private final class FlakyTransport: HttpTransport, @unchecked Sendable {
@@ -172,7 +173,7 @@ private struct OfflineTransport: HttpTransport {
 
 @Test func invitationWithACloudOriginStaysGenericallyUnreachable() async throws {
     let invitation = try PairingInvitation.parse(
-        invitationText(hostId: "", origins: ["http://192.168.1.2:17891", "https://vibex.xforever.xin/t/host-1"])
+        invitationText(hostId: "", origins: ["http://192.168.1.2:17891", "https://dimo-ai.com/t/host-1"])
     )
     #expect(!invitation.offersOnlyLocalOrigins)
     await #expect(throws: PairingError.unreachable) {
@@ -180,9 +181,19 @@ private struct OfflineTransport: HttpTransport {
     }
 }
 
+@Test func invitationAcceptsDimoAndLegacyVibexPrefixes() throws {
+    for prefix in ["dimo-pairing:", "vibex-pairing:"] {
+        let text = invitationText(prefix: prefix, origins: ["http://192.168.1.2:17891"])
+        #expect(PairingInvitation.looksLikeInvitation("  \(text)\n"))
+        #expect(try PairingInvitation.parse(text).host_id == "h")
+    }
+    #expect(!PairingInvitation.looksLikeInvitation("other-pairing:{}"))
+}
+
 @Test func invitationParseRejectsGarbage() {
     #expect(throws: PairingError.invalidInvitation) { try PairingInvitation.parse("K7M2NPQX") }
     #expect(throws: PairingError.invalidInvitation) { try PairingInvitation.parse("vibex-pairing:{") }
+    #expect(throws: PairingError.invalidInvitation) { try PairingInvitation.parse("dimo-pairing:{") }
 }
 
 @Test func redeemExplainsWhyTheHostRejectedTheCode() async throws {
@@ -278,7 +289,7 @@ private struct OfflineTransport: HttpTransport {
     let encryptedReq = try clientA.encryptRequestBody(plaintext, session: sessionA!)
     let decryptedByB = try E2eeSessionManager.decrypt(
         key: sessionB!.symmetricKey,
-        aad: Data("vibex-e2ee-req-v1".utf8),
+        aad: Data("dimo-e2ee-req-v1".utf8),
         base64Payload: encryptedReq
     )
     #expect(decryptedByB == plaintext)
@@ -333,13 +344,171 @@ private let pendingConnectJSON = "{\"request_id\":\"req-1\",\"host_id\":\"h1\",\
 
 @Test func requestConnectReportsAnOfflineDesktopBehindTheRelay() async throws {
     for status in [502, 503, 504] {
- let transport = ScriptedTransport([""], statuses: [status])
- await #expect(throws: PairingError.unreachable) {
-     try await PairingClient(transport: transport).requestConnect(
-  origin: HostOrigin.parse("https://vibex.xforever.xin/t/host-1"),
-  accountToken: "acct-token"
-     )
- }
+        let transport = ScriptedTransport([""], statuses: [status])
+        await #expect(throws: PairingError.unreachable) {
+            try await PairingClient(transport: transport).requestConnect(
+                origin: HostOrigin.parse("https://dimo-ai.com/t/host-1"),
+                accountToken: "acct-token"
+            )
+        }
+    }
+}
+
+@Test func migrateLegacyRelayOriginRewritesXforeverAndPreservesOthers() async {
+    #expect(PairingClient.defaultOfficialRelayBase == "https://dimo-ai.com")
+    #expect(
+        PairingClient.migrateLegacyRelayOrigin("https://vibex.xforever.xin/t/host-42")
+            == "https://dimo-ai.com/t/host-42"
+    )
+    #expect(
+        PairingClient.migrateLegacyRelayOrigin("http://vibex.xforever.xin/t/host-42/")
+            == "https://dimo-ai.com/t/host-42"
+    )
+    #expect(
+        PairingClient.migrateLegacyRelayOrigin("https://VIBEX.XFOREVER.XIN/")
+            == "https://dimo-ai.com"
+    )
+    #expect(
+        PairingClient.migrateLegacyRelayOrigin("http://192.168.1.20:17891")
+            == "http://192.168.1.20:17891"
+    )
+    #expect(
+        PairingClient.migrateLegacyRelayOrigin("https://custom.relay.example/t/host-42")
+            == "https://custom.relay.example/t/host-42"
+    )
+
+    PairingClient.rememberRelayBase("https://vibex.xforever.xin/t/host-legacy")
+    let bases = PairingClient.knownRelayBases(extraOrigins: ["http://vibex.xforever.xin/t/host-legacy-2"])
+    #expect(bases.contains("https://dimo-ai.com"))
+    #expect(!bases.contains { $0.contains("vibex.xforever.xin") })
+
+    let rendezvous = await PairingClient.resolveHostRendezvous(
+        hostId: "host-abc",
+        knownOrigins: ["https://vibex.xforever.xin/t/host-abc"]
+    )
+    #expect(rendezvous.contains("https://dimo-ai.com/t/host-abc"))
+    #expect(!rendezvous.contains { $0.contains("vibex.xforever.xin") })
+}
+
+@Test func e2eeClearSessionRemovesOnlyMatchingOrigin() {
+    let manager = E2eeSessionManager()
+    let peer = E2eeSessionManager()
+    let originA = "https://dimo-ai.com/t/host-a"
+    let originB = "https://dimo-ai.com/t/host-b"
+
+    #expect(manager.ingestHandshake(originOrUrl: originA, sessionId: "s-a", serverPubBase64: peer.clientPublicKeyBase64) != nil)
+    #expect(manager.ingestHandshake(originOrUrl: originB, sessionId: "s-b", serverPubBase64: peer.clientPublicKeyBase64) != nil)
+    #expect(manager.isE2eeActive(for: originA))
+    #expect(manager.isE2eeActive(for: originB))
+
+    manager.clearSession(for: "\(originA)/api/v1/capabilities")
+    #expect(!manager.isE2eeActive(for: originA))
+    #expect(manager.isE2eeActive(for: originB))
+}
+
+private final class MockE2eeRecoveryURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+@Test func urlSessionTransportClearsStaleE2eeSessionAndRetriesOn401Or412() async throws {
+    final class RequestLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: [String] = []
+        private var timeouts: [TimeInterval] = []
+        func record(path: String, timeout: TimeInterval) {
+            lock.withLock {
+                paths.append(path)
+                timeouts.append(timeout)
+            }
+        }
+        var recordedPaths: [String] { lock.withLock { paths } }
+        var recordedTimeouts: [TimeInterval] { lock.withLock { timeouts } }
+    }
+
+    let stalePeer = E2eeSessionManager()
+    let freshPeer = E2eeSessionManager()
+
+    for staleStatus in [401, 412] {
+        let origin = "https://dimo-ai.com/t/host-restart-\(staleStatus)"
+        _ = E2eeSessionManager.shared.ingestHandshake(
+            originOrUrl: origin,
+            sessionId: "stale-session",
+            serverPubBase64: stalePeer.clientPublicKeyBase64
+        )
+        #expect(E2eeSessionManager.shared.session(for: origin)?.sessionId == "stale-session")
+
+        let log = RequestLog()
+        MockE2eeRecoveryURLProtocol.handler = { req in
+            let url = req.url!
+            log.record(path: url.path, timeout: req.timeoutInterval)
+            if url.path.hasSuffix("/api/v1/e2ee/handshake") {
+                let resp = HTTPURLResponse(
+                    url: url,
+                    statusCode: 204,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        E2eeSessionManager.headerSession: "fresh-session",
+                        E2eeSessionManager.headerServerPub: freshPeer.clientPublicKeyBase64,
+                    ]
+                )!
+                return (resp, Data())
+            }
+            let sentSession = req.value(forHTTPHeaderField: E2eeSessionManager.headerSession)
+            if sentSession == "stale-session" {
+                let resp = HTTPURLResponse(url: url, statusCode: staleStatus, httpVersion: "HTTP/1.1", headerFields: [:])!
+                return (resp, Data())
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+            return (resp, Data(capabilitiesJSON.utf8))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockE2eeRecoveryURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let transport = URLSessionTransport(session: session)
+
+        let getExchange = try await transport.execute(
+            method: "GET",
+            url: "\(origin)/api/v1/capabilities",
+            headers: ["authorization": "Bearer real-token"],
+            body: nil
+        )
+        #expect(getExchange.status == 200)
+        #expect(E2eeSessionManager.shared.session(for: origin)?.sessionId == "fresh-session")
+        #expect(log.recordedPaths.count == 3)
+        #expect(log.recordedPaths[1].hasSuffix("/api/v1/e2ee/handshake"))
+        #expect(log.recordedTimeouts[0] == 25)
+
+        let postExchange = try await transport.execute(
+            method: "POST",
+            url: "\(origin)/api/v1/call/conversation_list_recent",
+            headers: ["authorization": "Bearer real-token"],
+            body: Data("{}".utf8)
+        )
+        #expect(postExchange.status == 200)
+        #expect(log.recordedTimeouts.last == 60)
+
+        E2eeSessionManager.shared.clearSession(for: origin)
     }
 }
 

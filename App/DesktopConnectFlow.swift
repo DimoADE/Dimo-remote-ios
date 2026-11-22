@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 import UIKit
 
-/// Drives seamless connection to a desktop signed into the same VibeX account (auto-selecting LAN first,
+/// Drives seamless connection to a desktop signed into the same Dimo account (auto-selecting LAN first,
 /// Cloud Relay second), plus 1-tap LAN 4-digit SAS visual comparison and code/QR fallback.
 @Observable
 @MainActor
@@ -284,10 +284,12 @@ struct DesktopPickerSheet: View {
     private var desktops: [AccountDesktop] { account.desktops }
 
     private var extraLanHosts: [DiscoveredLanHost] {
-        let knownIds = Set(desktops.map(\.hostId))
+        let knownIds = Set(desktops.map { $0.hostId.lowercased() })
         return servers.discoveredHosts.filter { host in
             guard !host.isCloudService else { return false }
-            guard let rawId = host.hostId.map(AccountDesktop.rawHostId), !rawId.isEmpty else { return true }
+            guard let rawId = host.hostId.map({ AccountDesktop.rawHostId($0).lowercased() }), !rawId.isEmpty else {
+                return true
+            }
             return !knownIds.contains(rawId)
         }
     }
@@ -337,6 +339,11 @@ struct DesktopPickerSheet: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color(.systemGroupedBackground))
+        .task {
+            if account.isSignedIn, flow.phase == .choosing {
+                await account.syncHosts(with: servers)
+            }
+        }
         .alert(
             "这台电脑已连接手机「\(flow.replaceConfirmation?.existingDeviceName ?? "")」，要替换吗？",
             isPresented: Binding(
@@ -386,46 +393,82 @@ struct DesktopPickerSheet: View {
                 }
                 let isSelected = flow.selectedDesktop(in: desktops)?.id == desktop.id
                 let lanReady = servers.lanOrigin(forHostId: desktop.hostId) != nil
-                Button {
-                    flow.selectedHostId = desktop.hostId
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "desktopcomputer")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
-                        Text(desktop.displayName)
-                            .font(.system(size: 14.5, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if let badge = desktop.osBadge {
-                            Text(badge)
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.secondary.opacity(0.12)))
-                                .foregroundStyle(.secondary)
-                        }
-                        if lanReady {
-                            Text("局域网极速")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.green.opacity(0.14)))
-                                .foregroundStyle(.green)
-                        }
-                        Spacer()
-                        if desktops.count > 1 && isSelected {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 13, weight: .semibold))
+                let canDelete = desktops.count > 1 && !lanReady && !desktop.cloudOnline
+                HStack(spacing: 0) {
+                    Button {
+                        flow.selectedHostId = desktop.hostId
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "desktopcomputer")
+                                .font(.system(size: 18, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
+                            Text(desktop.displayName)
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            if let badge = desktop.osBadge {
+                                Text(badge)
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if lanReady {
+                                Text("局域网极速")
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.green.opacity(0.14)))
+                                    .foregroundStyle(.green)
+                            } else if desktop.cloudOnline {
+                                Text("云端在线")
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.green.opacity(0.14)))
+                                    .foregroundStyle(.green)
+                            }
+                            Spacer(minLength: 6)
+                            if desktops.count > 1 && isSelected {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .padding(.leading, 14)
+                        .padding(.trailing, canDelete ? 6 : 14)
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(desktops.count < 2 || flow.phase != .choosing)
+
+                    if canDelete {
+                        Button {
+                            Task { await account.deleteDesktopHostConfig(hostId: desktop.hostId) }
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(flow.phase != .choosing)
+                        .accessibilityLabel("移除离线电脑")
+                        .padding(.trailing, 8)
+                    }
+                }
+                .contextMenu {
+                    if canDelete {
+                        Button(role: .destructive) {
+                            Task { await account.deleteDesktopHostConfig(hostId: desktop.hostId) }
+                        } label: {
+                            Label("移除此离线记录", systemImage: "trash")
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .disabled(desktops.count < 2 || flow.phase != .choosing)
             }
         }
         .background(cardBackground)
@@ -437,10 +480,10 @@ struct DesktopPickerSheet: View {
         let busy = flow.phase == .connecting
         let channelHint: String = {
             if lanAvailable {
-                return "同账号免确认直连 · 已就绪局域网高速通道"
+                return "同一 Wi-Fi 自动走局域网直连"
             }
             if account.canUseCloudRelay {
-                return "同账号免确认直连 · 自动优选局域网或云服务"
+                return "当前通过 Dimo 云服务连接"
             }
             return servers.discoveringHosts ? "正在扫描当前 Wi-Fi…" : "当前 Wi-Fi 未发现该电脑且账号未开启云服务"
         }()
@@ -506,10 +549,10 @@ struct DesktopPickerSheet: View {
             Image(systemName: "desktopcomputer")
                 .font(.system(size: 34, weight: .regular))
                 .foregroundStyle(Color.secondary)
-            Text("在电脑上打开 VibeX 并登录同一账号，即可免确认直连")
+            Text("在电脑上打开 Dimo 并登录同一账号，即可免确认直连")
                 .font(.system(size: 15, weight: .semibold))
                 .multilineTextAlignment(.center)
-            Button("下载 VibeX") {
+            Button("下载 Dimo") {
                 VibeXAccountStore.openSitePath("/download")
             }
             .font(.system(size: 14, weight: .semibold))

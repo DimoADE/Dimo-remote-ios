@@ -79,7 +79,7 @@ struct VibeXCompanionApp: App {
                     servers.declineSwitchToCloudFallback()
                 }
             } message: { prompt in
-                Text("当前与电脑「\(prompt.hostName)」的局域网直连已断开，但检测到可通过「VibeX 云服务 · Beta」继续连接。是否切换至云服务？")
+                Text("当前与电脑「\(prompt.hostName)」的局域网直连已断开，但检测到可通过「Dimo 云服务」继续连接。是否切换至云服务？")
             }
         }
     }

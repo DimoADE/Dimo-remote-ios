@@ -124,7 +124,7 @@ struct TaskActivityWidget: Widget {
     }
 }
 
-private let staleNote = "后台守护中 · 点按进入 VibeX 查看最新进展"
+private let staleNote = "后台守护中 · 点按进入 Dimo 查看最新进展"
 
 private func shortCompactLabel(for state: TaskActivityAttributes.ContentState) -> String {
     switch state.phase {
